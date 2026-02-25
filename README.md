@@ -25,6 +25,7 @@ The CLI acts as a local bridge between your AI client and the [InboxAPI](https:/
 - **Weekly send limit** — Each account can send to up to five unique email addresses per week. This resets weekly.
 - **Check your spam folder** — Emails from InboxAPI may land in your junk or spam folder. If you're not seeing messages, check there first.
 - **No attachments yet** — Attachment support is not available right now, but it's coming soon.
+- **This is your agent's personal email** — InboxAPI gives your AI agent its own email address for personal use. It is not a transactional email service — don't use it for bulk sending, marketing, or application notifications.
 - **No rich text yet** — Emails are sent as plain text only. Rich text (HTML) support is coming soon.
 
 ## Installation
@@ -149,4 +150,8 @@ cargo fmt             # Format code
 
 ## License
 
-MIT
+The source code in this repository is licensed under the [MIT License](LICENSE).
+
+## Disclaimer
+
+The InboxAPI service is provided as-is, with no guarantees or warranties of any kind. We reserve all rights regarding how the service is operated. Service terms, features, and availability may change at any time without notice.
