@@ -80,6 +80,12 @@ InboxAPI CLI works as an MCP STDIO transport. Point your MCP client at the `inbo
 claude mcp add inboxapi inboxapi
 ```
 
+**Gemini CLI:**
+
+```bash
+gemini mcp add inboxapi inboxapi
+```
+
 ## Development
 
 ```bash
