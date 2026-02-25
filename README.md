@@ -16,9 +16,9 @@ An account with a unique email address is created automatically on first run. Yo
 - **Search** emails by keyword
 - **Read full threads** of conversation
 
----
+## Technical details
 
-STDIO proxy that bridges the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) over STDIO to the remote [InboxAPI](https://inboxapi.ai) service over Streamable HTTP/SSE. This lets any MCP-compatible client (Claude Desktop, Claude Code, etc.) use InboxAPI's email tools without custom HTTP integration.
+The CLI acts as a local bridge between your AI client and the [InboxAPI](https://inboxapi.ai) cloud service. It speaks the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) over standard input/output, so any compatible AI client can use it without custom integration.
 
 ## Installation
 
