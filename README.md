@@ -19,20 +19,19 @@ Prebuilt binaries are included for:
 ## Getting Started
 
 ```bash
-# Create an account and authenticate
-inboxapi login
-
-# Start the proxy (reads JSON-RPC from stdin, forwards to InboxAPI)
+# Just start the proxy — an account is created automatically on first run
 inboxapi proxy
 ```
 
-After logging in, credentials are stored in your system config directory (`~/.config/inboxapi/credentials.json` on Linux/macOS) and automatically injected into tool calls.
+On first run with no saved credentials, the CLI auto-creates an account with a generated name (e.g. `brooding-fluffy-owl`) and authenticates. No manual setup needed.
+
+Credentials are stored in your system config directory (`~/.config/inboxapi/credentials.json` on Linux/macOS) and automatically injected into tool calls.
 
 ## Commands
 
 ### `proxy` (default)
 
-Starts the STDIO proxy. Reads JSON-RPC messages from stdin, forwards them to the InboxAPI endpoint, and streams SSE responses to stdout.
+Starts the STDIO proxy. Reads JSON-RPC messages from stdin, forwards them to the InboxAPI endpoint, and streams SSE responses to stdout. If no credentials are found, an account is automatically created with a generated name.
 
 ```bash
 inboxapi proxy
@@ -43,7 +42,7 @@ Running `inboxapi` with no subcommand also starts the proxy.
 
 ### `login`
 
-Creates an account and stores access credentials locally.
+Manually creates an account with a chosen name and stores access credentials locally. Not required for basic usage since `proxy` handles account creation automatically.
 
 ```bash
 inboxapi login

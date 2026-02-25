@@ -340,7 +340,7 @@ fn generate_agent_name() -> String {
     let weights = &TRANSITIONS[mood1_idx];
     let roll: f64 = rng.gen();
     let mut cumulative = 0.0;
-    let mut mood2 = MOODS[0];
+    let mut mood2 = MOODS[3]; // Default to last bucket for float rounding safety
     for (i, &w) in weights.iter().enumerate() {
         cumulative += w;
         if roll < cumulative {
