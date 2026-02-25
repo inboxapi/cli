@@ -1,0 +1,27 @@
+{
+  "name": "@inboxapi/cli",
+  "version": "0.1.0",
+  "description": "STDIO Proxy for InboxAPI MCP service",
+  "main": "index.js",
+  "bin": {
+    "inboxapi": "index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shaond/inboxapi-cli.git"
+  },
+  "keywords": [
+    "mcp",
+    "inboxapi",
+    "proxy",
+    "email",
+    "ai"
+  ],
+  "author": "Shaon Diwakar",
+  "license": "MIT",
+  "dependencies": {},
+  "scripts": {
+    "build": "cargo build --release",
+    "test": "cargo test"
+  }
+}
