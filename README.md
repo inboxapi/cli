@@ -18,8 +18,9 @@ Prebuilt binaries are included for:
 
 ## Getting Started
 
+Just start the proxy — an account is created automatically on first run
+
 ```bash
-# Just start the proxy — an account is created automatically on first run
 inboxapi proxy
 ```
 
@@ -80,31 +81,39 @@ InboxAPI CLI works as an MCP STDIO transport. Point your MCP client at the `inbo
 
 **Claude Code:**
 
-```bash
-# Add to current project
-claude mcp add inboxapi inboxapi
+Add to current project:
 
-# Add globally (available in all projects)
+```bash
+claude mcp add inboxapi inboxapi
+```
+
+Add globally (available in all projects):
+
+```bash
 claude mcp add inboxapi inboxapi -s user
 ```
 
 **Gemini CLI:**
 
-```bash
-# Add to current project
-gemini mcp add inboxapi inboxapi
+Add to current project:
 
-# Add system-wide (available in all directories)
+```bash
+gemini mcp add inboxapi inboxapi
+```
+
+Add system-wide (available in all directories):
+
+```bash
 gemini mcp add inboxapi inboxapi --scope user
 ```
 
 ## Development
 
 ```bash
-cargo build          # Build debug binary
+cargo build           # Build debug binary
 cargo build --release # Build release binary
-cargo test           # Run tests
-cargo fmt            # Format code
+cargo test            # Run tests
+cargo fmt             # Format code
 ```
 
 ## License
