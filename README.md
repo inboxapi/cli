@@ -1,6 +1,6 @@
 # InboxAPI CLI
 
-Give your AI agent its own email address. Send, receive, read, search, and reply to emails — right from Claude, Gemini, or any MCP-compatible AI client. No email server to run, no SMTP to configure.
+Give your AI agent its own email address. Send, receive, read, search, and reply to emails — right from Claude, Codex, Gemini, or any MCP-compatible AI client. No email server to run, no SMTP to configure.
 
 ### How it works
 
