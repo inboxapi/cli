@@ -20,7 +20,7 @@ function findBinary() {
   const pkg = PLATFORM_PACKAGES[platformKey];
   if (pkg) {
     try {
-      const pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
+      const pkgDir = path.dirname(require.resolve(`${pkg}/package.json`, { paths: [__dirname] }));
       const binPath = path.join(pkgDir, binName);
       if (fs.existsSync(binPath)) return binPath;
     } catch {}
