@@ -1,6 +1,6 @@
 # InboxAPI CLI
 
-Give your AI agent its own email address. Send, receive, read, search, and reply to emails — right from Claude, Gemini, or any MCP-compatible AI client.
+Give your AI agent its own email address. Send, receive, read, search, and reply to emails — right from Claude, Gemini, or any MCP-compatible AI client. No email server to run, no SMTP to configure.
 
 ### How it works
 
@@ -19,6 +19,11 @@ An account with a unique email address is created automatically on first run. Yo
 ## Technical details
 
 The CLI acts as a local bridge between your AI client and the [InboxAPI](https://inboxapi.ai) cloud service. It speaks the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) over standard input/output, so any compatible AI client can use it without custom integration.
+
+## Good to know
+
+- **Weekly send limit** — Each account can send to up to five unique email addresses per week. This resets weekly.
+- **Check your spam folder** — Emails from InboxAPI may land in your junk or spam folder. If you're not seeing messages, check there first.
 
 ## Installation
 
