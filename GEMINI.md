@@ -22,7 +22,7 @@ cargo run -- proxy # Start proxy (default)
 ```
 
 ## Implementation Notes
-- **Authentication:** Injects `access_token` into the `arguments` of `tools/call` JSON-RPC messages if the method is `tools/call` and `token` is missing.
+- **Authentication:** Injects `token` into the `arguments` of `tools/call` JSON-RPC messages if the method is `tools/call` and `token` is missing.
 - **Hashcash:** Custom SHA-1 implementation in `src/main.rs` for `account_create`.
 - **Proxy Loop:**
   - `stdin` -> `POST` to remote.
