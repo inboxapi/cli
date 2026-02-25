@@ -25,7 +25,11 @@ inboxapi proxy
 
 On first run with no saved credentials, the CLI auto-creates an account with a generated name (e.g. `brooding-fluffy-owl`) and authenticates. No manual setup needed.
 
-Credentials are stored in your system config directory (`~/.config/inboxapi/credentials.json` on Linux/macOS) and automatically injected into tool calls.
+Credentials are stored in your system config directory and automatically injected into tool calls. The CLI checks multiple locations so it can pick up credentials created by AI agents:
+
+- `~/Library/Application Support/inboxapi/credentials.json` (macOS primary)
+- `~/.config/inboxapi/credentials.json` (Linux primary / macOS fallback)
+- `~/.local/inboxapi/credentials.json` (fallback, used by some AI agents)
 
 ## Commands
 

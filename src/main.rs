@@ -53,11 +53,49 @@ fn get_credentials_path() -> Result<PathBuf> {
     Ok(base_dir.join("inboxapi").join("credentials.json"))
 }
 
+/// Returns all candidate paths where credentials might be stored.
+/// The primary path (from `dirs::config_dir()`) is first, followed by
+/// `~/.config/` and `~/.local/` fallbacks that AI agents may use.
+fn get_credentials_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Primary: platform config dir (~/Library/Application Support on macOS, ~/.config on Linux)
+    if let Ok(primary) = get_credentials_path() {
+        paths.push(primary);
+    }
+
+    // Fallbacks: locations AI agents may write to
+    if let Some(home) = dirs::home_dir() {
+        let config_path = home
+            .join(".config")
+            .join("inboxapi")
+            .join("credentials.json");
+        let local_path = home
+            .join(".local")
+            .join("inboxapi")
+            .join("credentials.json");
+
+        if !paths.contains(&config_path) {
+            paths.push(config_path);
+        }
+        if !paths.contains(&local_path) {
+            paths.push(local_path);
+        }
+    }
+
+    paths
+}
+
 fn load_credentials() -> Result<Credentials> {
-    let path = get_credentials_path()?;
-    let content = std::fs::read_to_string(path)
-        .context("Could not read credentials file. Have you run 'inboxapi login'?")?;
-    serde_json::from_str(&content).context("Failed to parse credentials file")
+    for path in get_credentials_search_paths() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            return serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse credentials file: {}", path.display()));
+        }
+    }
+    Err(anyhow!(
+        "No credentials file found. Have you run 'inboxapi login'?"
+    ))
 }
 
 fn save_credentials(creds: &Credentials) -> Result<()> {
