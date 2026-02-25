@@ -1,5 +1,23 @@
 # InboxAPI CLI
 
+Give your AI agent its own email address. Send, receive, read, search, and reply to emails — right from Claude, Gemini, or any MCP-compatible AI client.
+
+### How it works
+
+1. Install the CLI
+2. Connect it to your AI client (Claude Desktop, Claude Code, Gemini CLI, etc.)
+3. Your AI can now use email — no code or API keys needed
+
+An account with a unique email address is created automatically on first run. Your AI can then:
+
+- **Send emails** to any address
+- **Receive emails** at its own inbox
+- **Reply to** and **forward** emails
+- **Search** emails by keyword
+- **Read full threads** of conversation
+
+---
+
 STDIO proxy that bridges the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) over STDIO to the remote [InboxAPI](https://inboxapi.ai) service over Streamable HTTP/SSE. This lets any MCP-compatible client (Claude Desktop, Claude Code, etc.) use InboxAPI's email tools without custom HTTP integration.
 
 ## Installation
