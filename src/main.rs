@@ -681,7 +681,14 @@ fn inject_initialize_instructions(body: &str) -> String {
 
 const AUTH_TOOL_OVERRIDE: &str = "Handled automatically by the CLI proxy. Do not call directly.";
 
-const AUTH_TOOLS_TO_REWRITE: &[&str] = &["account_create", "auth_exchange", "auth_refresh"];
+const AUTH_TOOLS_TO_REWRITE: &[&str] = &[
+    "account_create",
+    "auth_exchange",
+    "auth_refresh",
+    "auth_introspect",
+    "auth_revoke",
+    "auth_revoke_all",
+];
 
 fn rewrite_tools_list(body: &str) -> String {
     if let Ok(mut parsed) = serde_json::from_str::<Value>(body) {
@@ -696,6 +703,20 @@ fn rewrite_tools_list(body: &str) -> String {
                         if let Some(obj) = tool.as_object_mut() {
                             obj.insert("description".to_string(), json!(AUTH_TOOL_OVERRIDE));
                         }
+                    }
+                }
+
+                // Strip `token` from every tool's inputSchema
+                if let Some(schema) = tool.get_mut("inputSchema").and_then(|s| s.as_object_mut()) {
+                    if let Some(props) =
+                        schema.get_mut("properties").and_then(|p| p.as_object_mut())
+                    {
+                        props.remove("token");
+                    }
+                    if let Some(required) =
+                        schema.get_mut("required").and_then(|r| r.as_array_mut())
+                    {
+                        required.retain(|v| v.as_str() != Some("token"));
                     }
                 }
             }
@@ -718,6 +739,11 @@ fn inject_token(msg: &mut Value, token: &str) {
                         || name == "auth_refresh"
                     {
                         return;
+                    }
+
+                    // Create arguments object if missing
+                    if !params.contains_key("arguments") {
+                        params.insert("arguments".to_string(), json!({}));
                     }
 
                     if let Some(arguments) =
@@ -1151,11 +1177,11 @@ mod tests {
                 "name": "get_emails"
             }
         });
-        let original = msg.clone();
         inject_token(&mut msg, "test-token");
 
-        // No arguments object to inject into, so message unchanged
-        assert_eq!(msg, original);
+        // Creates arguments object and injects token
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args["token"], "test-token");
     }
 
     #[test]
@@ -1478,7 +1504,7 @@ mod tests {
 
         assert_eq!(tools[0]["description"], "Fetch emails from your inbox");
         assert_eq!(tools[1]["description"], "Show help text");
-        assert_eq!(tools[2]["description"], "Check token status");
+        assert_eq!(tools[2]["description"], AUTH_TOOL_OVERRIDE);
         assert_eq!(tools[3]["description"], AUTH_TOOL_OVERRIDE);
     }
 
