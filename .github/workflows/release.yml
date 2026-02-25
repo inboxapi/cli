@@ -49,16 +49,13 @@ jobs:
       - name: Install AArch64 Cross-Compiler (Linux)
         if: matrix.platform.target == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libssl-dev:arm64
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build binary
         run: cargo build --release --target ${{ matrix.platform.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          PKG_CONFIG_ALLOW_CROSS: 1
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
 
       - name: Prepare Artifact
         shell: bash
