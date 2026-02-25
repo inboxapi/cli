@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use eventsource_client::{Client, SSE};
-use futures_util::StreamExt;
 use reqwest::{
     header::{ACCEPT, CONTENT_TYPE},
     Client as HttpClient,
@@ -141,51 +139,16 @@ async fn run_proxy(endpoint: String) -> Result<()> {
         }
     };
 
-    // Connect to SSE after credential resolution (avoids idle SSE during hashcash PoW)
-    let client = eventsource_client::ClientBuilder::for_url(&endpoint)?
-        .header(ACCEPT.as_str(), "text/event-stream")?
-        .build();
-
-    let mut sse_stream = client.stream();
-
-    // Spawn task for handling SSE -> stdout
-    tokio::spawn(async move {
-        let mut out = stdout();
-        while let Some(event) = sse_stream.next().await {
-            match event {
-                Ok(SSE::Event(ev)) => {
-                    // In MCP Streamable HTTP, messages might come as "message" events or similar
-                    // The standard SSE transport for MCP sends JSON-RPC in the "message" event data
-                    if ev.event_type == "message" {
-                        if let Err(e) = out.write_all(format!("{}\n", ev.data).as_bytes()).await {
-                            eprintln!("Failed to write to stdout: {}", e);
-                            break;
-                        }
-                        if let Err(e) = out.flush().await {
-                            eprintln!("Failed to flush stdout: {}", e);
-                            break;
-                        }
-                    } else if ev.event_type == "endpoint" {
-                        // The server might send a new endpoint to POST to, but in our case it's usually the same
-                        // If it's different, we should probably update it.
-                        // However, for simplicity let's just ignore for now if it matches.
-                    }
-                }
-                Ok(SSE::Comment(_)) => {}
-                Err(e) => {
-                    eprintln!("SSE Error: {}", e);
-                }
-            }
-        }
-    });
-
-    // Handle stdin -> POST
+    // Handle stdin -> POST, read responses as Streamable HTTP (JSON or SSE)
+    let mut out = stdout();
     let mut lines = BufReader::new(stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         let mut msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        let is_notification = msg.get("id").is_none();
 
         // Inject token if needed
         if let Some(creds) = &creds {
@@ -204,12 +167,92 @@ async fn run_proxy(endpoint: String) -> Result<()> {
         match res {
             Ok(resp) => {
                 let status = resp.status();
+                if status == reqwest::StatusCode::ACCEPTED {
+                    // 202 Accepted — server acknowledged a notification, no body expected
+                    continue;
+                }
                 if !status.is_success() {
                     let err_text = resp
                         .text()
                         .await
                         .unwrap_or_else(|_| "Unknown error".to_string());
                     eprintln!("POST failed ({}): {}", status, err_text);
+                    continue;
+                }
+
+                let content_type = resp
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+
+                if content_type.contains("text/event-stream") {
+                    // Stream SSE events, extract data from "message" events
+                    use tokio_stream::StreamExt as _;
+                    let mut stream = resp.bytes_stream();
+                    let mut buf = String::new();
+
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = match chunk {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("Stream error: {}", e);
+                                break;
+                            }
+                        };
+                        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                        // Process complete SSE events (separated by blank lines)
+                        while let Some(pos) = buf.find("\n\n") {
+                            let event_block = buf[..pos].to_string();
+                            buf = buf[pos + 2..].to_string();
+
+                            let mut event_type = String::new();
+                            let mut data_lines = Vec::new();
+
+                            for line in event_block.lines() {
+                                if let Some(val) = line.strip_prefix("event:") {
+                                    event_type = val.trim().to_string();
+                                } else if let Some(val) = line.strip_prefix("data:") {
+                                    data_lines.push(val.trim_start_matches(' ').to_string());
+                                }
+                            }
+
+                            if event_type == "message" && !data_lines.is_empty() {
+                                let data = data_lines.join("\n");
+                                out.write_all(format!("{}\n", data).as_bytes()).await?;
+                                out.flush().await?;
+                            }
+                        }
+                    }
+
+                    // Process any remaining data in the buffer
+                    if !buf.trim().is_empty() {
+                        let mut event_type = String::new();
+                        let mut data_lines = Vec::new();
+
+                        for line in buf.lines() {
+                            if let Some(val) = line.strip_prefix("event:") {
+                                event_type = val.trim().to_string();
+                            } else if let Some(val) = line.strip_prefix("data:") {
+                                data_lines.push(val.trim_start_matches(' ').to_string());
+                            }
+                        }
+
+                        if event_type == "message" && !data_lines.is_empty() {
+                            let data = data_lines.join("\n");
+                            out.write_all(format!("{}\n", data).as_bytes()).await?;
+                            out.flush().await?;
+                        }
+                    }
+                } else {
+                    // JSON response — write directly to stdout
+                    let body = resp.text().await.unwrap_or_default();
+                    if !body.is_empty() && !is_notification {
+                        out.write_all(format!("{}\n", body).as_bytes()).await?;
+                        out.flush().await?;
+                    }
                 }
             }
             Err(e) => {
@@ -380,6 +423,7 @@ async fn create_account_and_authenticate(
     let resp = http_client
         .post(endpoint)
         .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -415,6 +459,7 @@ async fn create_account_and_authenticate(
     let resp = http_client
         .post(endpoint)
         .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 2,
