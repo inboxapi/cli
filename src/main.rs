@@ -543,6 +543,23 @@ mod tests {
         assert_eq!(msg, original);
     }
 
+    #[test]
+    fn inject_token_handles_null_name() {
+        let mut msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": null,
+                "arguments": {"foo": "bar"}
+            }
+        });
+        let original = msg.clone();
+        inject_token(&mut msg, "test-token");
+
+        assert_eq!(msg, original);
+    }
+
     // --- Credentials tests ---
 
     #[test]

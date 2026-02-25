@@ -124,7 +124,13 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [[ "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "VERSION=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Error: tag '$GITHUB_REF_NAME' does not match expected pattern 'v<major>.<minor>.<patch>'" >&2
+            exit 1
+          fi
 
       - name: Publish platform packages
         env:
@@ -139,10 +145,11 @@ jobs:
 
             cp "artifacts/${artifact_name}/${bin_name}" "npm/${npm_dir}/${bin_name}"
             chmod +x "npm/${npm_dir}/${bin_name}" 2>/dev/null || true
-            cd "npm/${npm_dir}"
-            npm version "${VERSION}" --no-git-tag-version
-            npm publish --access public
-            cd ../..
+            (
+              cd "npm/${npm_dir}" &&
+              npm version "${VERSION}" --no-git-tag-version &&
+              npm publish --access public
+            )
           }
 
           publish_platform "inboxapi-cli-linux-x64"   "cli-linux-x64"   "inboxapi-cli"
@@ -158,13 +165,40 @@ jobs:
           VERSION="${{ steps.version.outputs.VERSION }}"
 
           # Stamp version on root package and align optionalDependencies
-          node -e "
-            const pkg = require('./package.json');
-            pkg.version = '${VERSION}';
-            for (const dep of Object.keys(pkg.optionalDependencies || {})) {
-              pkg.optionalDependencies[dep] = '${VERSION}';
-            }
-            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          OPTIONAL_DEPS="$(
+            node -e "
+              const fs = require('fs');
+              const pkg = require('./package.json');
+              pkg.version = '${VERSION}';
+              const deps = Object.keys(pkg.optionalDependencies || {});
+              for (const dep of deps) {
+                pkg.optionalDependencies[dep] = '${VERSION}';
+              }
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              console.log(deps.join(' '));
+            "
+          )"
+
+          # Wait for platform packages to be visible on npm before publishing main package
+          if [ -n "$OPTIONAL_DEPS" ]; then
+            for dep in $OPTIONAL_DEPS; do
+              echo "Verifying availability of ${dep}@${VERSION} on npm..."
+              attempt=1
+              max_attempts=5
+              while true; do
+                if npm view "${dep}@${VERSION}" version --json >/dev/null 2>&1; then
+                  echo "Found ${dep}@${VERSION} on npm."
+                  break
+                fi
+                if [ "$attempt" -ge "$max_attempts" ]; then
+                  echo "ERROR: ${dep}@${VERSION} not visible on npm after ${max_attempts} attempts." >&2
+                  exit 1
+                fi
+                echo "  ${dep}@${VERSION} not yet visible (attempt ${attempt}/${max_attempts}), retrying in 10s..."
+                attempt=$((attempt + 1))
+                sleep 10
+              done
+            done
+          fi
 
           npm publish --access public

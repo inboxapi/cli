@@ -60,7 +60,11 @@ if (binPath) {
     process.exit(1);
   });
   child.on('error', () => {
-    console.error("Binary not found and 'cargo' failed to start. Have you built the project?");
+    const platformKey = `${process.platform}-${process.arch}`;
+    console.error(
+      `No pre-built binary available for ${platformKey}. Supported platforms: ${Object.keys(PLATFORM_PACKAGES).join(', ')}.\n` +
+      `Fallback to 'cargo run' also failed. Install Rust (https://rustup.rs) or use a supported platform.`
+    );
     process.exit(1);
   });
 }
