@@ -132,6 +132,12 @@ Add system-wide (available in all directories):
 gemini mcp add inboxapi inboxapi --scope user
 ```
 
+**Codex CLI:**
+
+```bash
+codex mcp add inboxapi -- inboxapi
+```
+
 ## Development
 
 ```bash
