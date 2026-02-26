@@ -9,6 +9,9 @@ Rust-based STDIO proxy that bridges JSON-RPC (MCP protocol) over STDIO to the re
 - `cargo run -- proxy` — start the STDIO proxy (default)
 - `cargo run -- login` — authenticate and store credentials
 - `cargo run -- whoami` — show current account info
+- `cargo run -- reset` — delete stored credentials (with optional backup prompt)
+- `cargo run -- backup <folder>` — back up credentials to a folder
+- `cargo run -- restore <folder>` — restore credentials from a backup folder
 
 ## Architecture
 - **Single-file proxy** (`src/main.rs`): reads JSON-RPC from stdin, POSTs to remote endpoint, streams SSE responses to stdout. Injects stored access tokens into `tools/call` arguments.
@@ -32,6 +35,13 @@ Rust-based STDIO proxy that bridges JSON-RPC (MCP protocol) over STDIO to the re
 - `npm/cli-*/package.json` — platform-specific npm package manifests
 - `.github/workflows/release.yml` — cross-build + GitHub Release + npm publish
 - `Cargo.toml` — Rust dependencies
+
+## Pre-completion Checklist
+Before declaring work done, run these in order:
+1. `cargo fmt` — format code
+2. `cargo clippy -- -D warnings` — lint with zero warnings
+3. `cargo test` — all unit tests pass
+4. `cargo build` — clean compilation
 
 ## Rules
 - Do not add AI attribution to commits, code, or comments
