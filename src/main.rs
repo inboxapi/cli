@@ -6,7 +6,6 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::Write;
 use std::path::PathBuf;
 use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -110,6 +109,7 @@ fn save_credentials(creds: &Credentials) -> Result<()> {
 
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
