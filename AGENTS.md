@@ -10,6 +10,10 @@ cargo test           # Run tests
 cargo fmt            # Format Rust code
 cargo run -- proxy   # Start proxy (default subcommand)
 cargo run -- login   # Authenticate
+cargo run -- whoami  # Show current account info
+cargo run -- reset   # Delete stored credentials
+cargo run -- backup <folder>   # Back up credentials
+cargo run -- restore <folder>  # Restore credentials from backup
 ```
 
 ## Architecture
@@ -53,8 +57,15 @@ Cargo.toml                     — Rust dependencies
 - Do not add AI attribution to commits, code, or comments
 - Keep `src/main.rs` as a single file — this is a simple proxy, not a framework
 
+## Pre-completion Checklist
+Before declaring work done, run these in order:
+1. `cargo fmt` — format code
+2. `cargo clippy -- -D warnings` — lint with zero warnings
+3. `cargo test` — all unit tests pass
+4. `cargo build` — clean compilation
+
 ## Contribution Workflow
 1. Create a feature branch from `main`
 2. Implement changes with focused commits
-3. Run `cargo build && cargo test && cargo fmt --check`
+3. Run the pre-completion checklist above
 4. Open a PR against `main`

@@ -37,6 +37,18 @@ enum Commands {
     },
     /// Show current account info
     Whoami,
+    /// Delete stored credentials
+    Reset,
+    /// Back up credentials to a folder
+    Backup {
+        /// Destination folder for the backup
+        folder: String,
+    },
+    /// Restore credentials from a backup folder
+    Restore {
+        /// Source folder containing the backup
+        folder: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -128,6 +140,138 @@ fn save_credentials(creds: &Credentials) -> Result<()> {
     Ok(())
 }
 
+fn prompt_yes_no(prompt: &str) -> bool {
+    eprint!("{}", prompt);
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    eprint!("{}", prompt);
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read input")?;
+    Ok(input.trim().to_string())
+}
+
+fn reset_credentials() -> Result<()> {
+    let creds = match load_credentials() {
+        Ok(c) => c,
+        Err(_) => {
+            println!("No credentials found.");
+            return Ok(());
+        }
+    };
+
+    println!("Account: {}", creds.account_name);
+    if let Some(ref email) = creds.email {
+        println!("Email: {}", email);
+    }
+
+    if prompt_yes_no("Back up credentials before resetting? [y/N] ") {
+        let folder = prompt_line("Backup folder path: ")?;
+        if folder.is_empty() {
+            println!("No folder provided, skipping backup.");
+        } else {
+            backup_credentials(&folder)?;
+        }
+    }
+
+    if !prompt_yes_no("Are you sure you want to reset credentials? [y/N] ") {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    for path in get_credentials_search_paths() {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("Failed to delete {}", path.display()))?;
+            println!("Deleted: {}", path.display());
+        }
+    }
+    println!("Credentials reset.");
+    Ok(())
+}
+
+fn backup_credentials(folder: &str) -> Result<()> {
+    let creds = load_credentials()?;
+    let dest = PathBuf::from(folder);
+    std::fs::create_dir_all(&dest)
+        .with_context(|| format!("Failed to create directory {}", dest.display()))?;
+
+    let dest_file = dest.join("credentials.json");
+
+    if dest_file.exists() && !prompt_yes_no("Backup file already exists. Overwrite? [y/N] ") {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    let content = serde_json::to_string_pretty(&creds)?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&dest_file)?;
+        file.write_all(content.as_bytes())?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&dest_file, content)?;
+    }
+
+    println!("Credentials backed up to {}", dest_file.display());
+    Ok(())
+}
+
+fn restore_credentials(folder: &str) -> Result<()> {
+    let src_file = PathBuf::from(folder).join("credentials.json");
+    let content = std::fs::read_to_string(&src_file)
+        .with_context(|| format!("Failed to read {}", src_file.display()))?;
+    let creds: Credentials = serde_json::from_str(&content)
+        .with_context(|| format!("Invalid credentials format in {}", src_file.display()))?;
+
+    if creds.access_token.trim().is_empty() || creds.refresh_token.trim().is_empty() {
+        return Err(anyhow!(
+            "Backup contains empty tokens — refusing to restore potentially corrupted credentials"
+        ));
+    }
+
+    if let Ok(existing) = load_credentials() {
+        println!("Existing credentials found for: {}", existing.account_name);
+        if prompt_yes_no("Back up existing credentials before restoring? [y/N] ") {
+            let backup_folder = prompt_line("Backup folder path: ")?;
+            if backup_folder.is_empty() {
+                println!("No folder provided, skipping backup.");
+            } else {
+                backup_credentials(&backup_folder)?;
+            }
+        }
+        if !prompt_yes_no("Overwrite existing credentials? [y/N] ") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    save_credentials(&creds)?;
+
+    println!("Credentials restored for: {}", creds.account_name);
+    if let Some(ref email) = creds.email {
+        println!("Email: {}", email);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -144,6 +288,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Proxy { endpoint }) => run_proxy(endpoint).await,
+        Some(Commands::Reset) => reset_credentials(),
+        Some(Commands::Backup { folder }) => backup_credentials(&folder),
+        Some(Commands::Restore { folder }) => restore_credentials(&folder),
         None => {
             // Prefer the endpoint stored in credentials, if available; fall back to CLI default.
             let endpoint = match load_credentials() {
@@ -1029,7 +1176,7 @@ async fn create_account_and_authenticate(
         .get("result")
         .and_then(|r| r.get("content"))
         .and_then(|c| c.as_array())
-        .and_then(|c| c.get(0))
+        .and_then(|c| c.first())
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
         .ok_or_else(|| anyhow!("Failed to parse account_create response: {:?}", resp))?;
@@ -1063,7 +1210,7 @@ async fn create_account_and_authenticate(
         .get("result")
         .and_then(|r| r.get("content"))
         .and_then(|c| c.as_array())
-        .and_then(|c| c.get(0))
+        .and_then(|c| c.first())
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
         .ok_or_else(|| anyhow!("Failed to parse auth_exchange response: {:?}", resp))?;
