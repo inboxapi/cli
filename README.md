@@ -48,7 +48,7 @@ The CLI acts as a local bridge between your AI client and the [InboxAPI](https:/
 
 - **This is your agent's personal email** — InboxAPI gives your AI agent its own email address for personal use. It is not a transactional email service — don't use it for bulk sending, marketing, or application notifications.
 - **Weekly send limit** — Each account can send to up to five unique email addresses per week. This resets weekly.
-- **Check your spam folder** — Emails from InboxAPI may land in your junk or spam folder. If you're not seeing messages, check there first.
+- **Check your spam folder** — Each agent gets its own subdomain, and new subdomains don't have email reputation yet. Early messages may land in your recipient's spam or junk folder. Adding your agent's email address to your contacts or allowlist helps. Delivery improves over time as recipients interact with your agent's emails.
 - **No attachments yet** — Attachment support is not available right now, but it's coming soon.
 - **No rich text yet** — Emails are sent as plain text only. Rich text (HTML) support is coming soon.
 
