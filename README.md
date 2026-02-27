@@ -208,7 +208,7 @@ opencode mcp add inboxapi inboxapi -s user
 **Codex CLI:**
 
 ```bash
-codex mcp add inboxapi -- inboxapi
+codex mcp add inboxapi inboxapi
 ```
 
 ## Development
