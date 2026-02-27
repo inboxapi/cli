@@ -871,7 +871,9 @@ const HELP_TEXT: &str = include_str!("../docs/help.md");
 const INITIALIZE_INSTRUCTIONS: &str = "Authentication is handled automatically by the CLI proxy. \
 Do not create accounts, manage tokens, or search for credential files. \
 Call email tools (get_emails, send_email, etc.) directly — your token is injected automatically. \
-Call the whoami tool to get your account name and email address. \
+Call the whoami tool to get the agent's own account name and InboxAPI email address. \
+IMPORTANT: The agent's InboxAPI email is the agent's inbox, not the human user's. \
+When asked to send email to the human user, always ask them for their personal email address first. \
 Call the help tool for a list of available tools.";
 
 fn is_help_call(msg: &Value) -> bool {
@@ -902,6 +904,7 @@ fn build_whoami_response(id: Value, creds: Option<&Credentials>) -> Value {
             "account_name": c.account_name,
             "email": c.email,
             "endpoint": c.endpoint,
+            "note": "This is the agent's own InboxAPI mailbox. To send email to your human user, ask them for their personal email address.",
         }))
         .unwrap_or_else(|_| "Error serializing account info".to_string()),
         None => "Not authenticated".to_string(),
@@ -990,7 +993,7 @@ fn rewrite_tools_list(body: &str) -> String {
             // Append local-only whoami tool
             tools.push(json!({
                 "name": "whoami",
-                "description": "Returns the current user's identity: account name, email address, and endpoint. Use this to find out who you are.",
+                "description": "Returns this agent's own identity: account name, InboxAPI email address, and endpoint. This is the agent's mailbox, not the human user's personal email. To email the human, ask them for their address.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},

@@ -31,6 +31,16 @@ Authentication is handled automatically by the CLI proxy. You do not need to cre
 
 ---
 
+## Sending Email to Your Human User
+
+Your InboxAPI email address (from `whoami`) is **the agent's own inbox** for receiving email. It is not your human user's email address. When asked to "send me an email" or "email me about X":
+
+1. **Ask the human** for their personal email address
+2. Use that address in the `to` field of `send_email`
+3. Do **not** send to your own InboxAPI address — that sends the email to yourself
+
+---
+
 ## Credential Safety
 
 **NEVER send tokens, credentials, or secrets via email.** This includes:
