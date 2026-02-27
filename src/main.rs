@@ -950,6 +950,7 @@ fn inject_initialize_instructions(body: &str, creds: Option<&Credentials>) -> St
     if let Ok(mut parsed) = serde_json::from_str::<Value>(body) {
         if let Some(result) = parsed.get_mut("result").and_then(|r| r.as_object_mut()) {
             let mut instructions = INITIALIZE_INSTRUCTIONS.to_string();
+            // Only inject identity when email is available — name alone isn't actionable.
             if let Some(c) = creds {
                 let name = sanitize_for_description(&c.account_name);
                 if let Some(ref email) = c.email {
@@ -982,6 +983,8 @@ const AUTH_TOOLS_TO_REWRITE: &[&str] = &[
 const IDENTITY_TOOLS: &[&str] = &["send_email", "send_reply", "forward_email"];
 
 fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
+    // Identity is only injected when both account_name and email are present.
+    // Name alone isn't useful — agents need the email to know their from address.
     let identity_suffix = creds.and_then(|c| {
         c.email.as_ref().map(|email| {
             let name = sanitize_for_description(&c.account_name);
@@ -1986,6 +1989,49 @@ mod tests {
         let long_input = "a".repeat(200);
         let result = sanitize_for_description(&long_input);
         assert_eq!(result.len(), 128);
+    }
+
+    // --- creds without email edge case tests ---
+
+    fn make_creds_without_email() -> Credentials {
+        Credentials {
+            access_token: "at".to_string(),
+            refresh_token: "rt".to_string(),
+            account_name: "no-email-agent".to_string(),
+            endpoint: "https://example.com".to_string(),
+            email: None,
+        }
+    }
+
+    #[test]
+    fn inject_initialize_instructions_with_creds_no_email_skips_identity() {
+        let creds = make_creds_without_email();
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
+        let modified = inject_initialize_instructions(body, Some(&creds));
+        let parsed: Value = serde_json::from_str(&modified).unwrap();
+        let instructions = parsed["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("handled automatically"));
+        assert!(!instructions.contains("no-email-agent"));
+    }
+
+    #[test]
+    fn rewrite_tools_list_with_creds_no_email_skips_identity_tools() {
+        let creds = make_creds_without_email();
+        let body = make_tools_list_response(vec![
+            json!({"name": "send_email", "description": "Send an email."}),
+            json!({"name": "get_emails", "description": "Get emails."}),
+        ]);
+        let result = rewrite_tools_list(&body, Some(&creds));
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let tools = parsed["result"]["tools"].as_array().unwrap();
+
+        // send_email should NOT be annotated when email is missing
+        assert_eq!(tools[0]["description"], "Send an email.");
+        // whoami should use the default description
+        let whoami = tools.last().unwrap();
+        let desc = whoami["description"].as_str().unwrap();
+        assert!(!desc.contains("no-email-agent"));
+        assert!(desc.contains("Returns this agent's own identity:"));
     }
 
     // --- is_token_expired_error tests ---
