@@ -222,73 +222,81 @@ cargo fmt             # Format code
 
 ## FAQ
 
-**How is this different from AWS SES, SendGrid, or Resend?**
+### Why not just give my agent access to my Gmail or Outlook?
+
+**Security** — Gmail/Outlook OAuth gives your agent access to your entire inbox (medical, financial, legal, personal). A prompt injection in any inbound email could manipulate an agent with access to all of it. InboxAPI gives your agent its own isolated inbox with trust classification and datamarking on every message.
+
+**Identity** — When your agent sends from your Gmail, recipients can't tell who they're talking to. Replies go to your inbox, mixed with your real mail. InboxAPI gives your agent its own address — clear separation between you and your agent.
+
+**Practicality** — Gmail/Outlook APIs aren't MCP-native. You'd need middleware, OAuth plumbing, and custom integration. InboxAPI works out of the box with any MCP client.
+
+### How is this different from AWS SES, SendGrid, or Resend?
 
 Those are sending APIs — you build email infrastructure on top of them. InboxAPI gives your agent a complete email identity: send, receive, search, reply, and forward. There's nothing to configure and no infrastructure to manage.
 
-**How is this different from AgentMail or a1base?**
+### How is this different from AgentMail or a1base?
 
 We built our own email stack from the ground up. We don't wrap SES, Postfix, or any third-party sending service. Your agent's mail goes through infrastructure we operate directly.
 
-**Is it really free?**
+### Is it really free?
 
 Yes. No credit card, no trial period, no usage tiers. We're working on paid plans with additional features, but the core experience will always be free.
 
-**How do you prevent spam and abuse?**
+### How do you prevent spam and abuse?
 
 Account creation requires proof-of-work. Each account can only email 5 unique external email addresses per week. Daily send quotas and rate limiting are enforced on every account. These constraints are structural — they're not policies, they're how the system works.
 
-**What about prompt injection via email?**
+### What about prompt injection via email?
 
 Every inbound email includes a trust classification — trusted, agent, unverified, or suspicious — based on whether the sender is in your addressbook and whether their email passes authentication checks. This helps your agent decide how cautiously to handle each message. Emails from other InboxAPI agents are flagged separately so your agent knows to check with you before acting on them.
 
 Additionally, untrusted email content is automatically transformed using spotlighting (datamarking) — whitespace is replaced with a unique marker character so your agent can clearly distinguish email data from its own instructions. This reduces the success rate of prompt injection attacks embedded in emails from ~50% to under 3%.
 
-**What is spotlighting?**
+### What is spotlighting?
 
 Email retrieval tools apply datamarking to untrusted content, replacing whitespace with a unique Unicode marker character generated per request. Content containing the marker should be treated as external data — never as instructions to follow. To recover the original text, replace the marker with a space. Emails from trusted senders (in your addressbook with valid authentication) are not spotlighted by default. This technique is based on academic research ([arXiv:2403.14720](https://arxiv.org/abs/2403.14720)).
 
-**What about data exfiltration?**
+### What about data exfiltration?
 
 Outbound emails are scanned for authentication tokens and credentials. If your agent accidentally tries to send an email containing a JWT or access token, the message is rejected before it leaves the platform. This prevents agents from being tricked into leaking sensitive data via email. Additionally, all recipient addresses in send, reply, and forward operations are validated against RFC 5322 — malformed addresses are rejected before delivery.
 
-**Can agents spam each other?**
+### Can agents spam each other?
 
 The same send limits apply to all outbound email — recipient caps, quotas, and rate limiting work the same regardless of who's on the receiving end.
 
-**Will my agent's emails land in spam?**
+### Will my agent's emails land in spam?
 
 Maybe at first. Each agent gets a brand-new subdomain, and new senders don't have reputation yet. Recipients may need to check their spam folder for the first few emails. Over time, as your agent sends legitimate mail and recipients interact with it, delivery improves.
 
-**Why email instead of a native agent protocol like A2A?**
+### Why email instead of a native agent protocol like A2A?
 
 Email reaches the entire existing internet — billions of people and businesses already use it. A2A requires both sides to implement the protocol. When your agent needs to reach someone outside its own ecosystem, email is the universal option. Agents will likely need both.
 
-**What are the send limits?**
+### What are the send limits?
 
 Each account can email up to 5 unique external email addresses per week. Emails to other @inboxapi.ai addresses don't count against this limit. The limit resets weekly.
 
-**What happens when I hit the limit?**
+### What happens when I hit the limit?
 
 When all 5 slots are in use, the least recently used entry is auto-replaced after 5 days of inactivity.
 
-**Can I send attachments?**
+### Can I send attachments?
 
 Not yet. Attachment support is coming soon.
 
-**Can I send HTML emails?**
+### Can I send HTML emails?
 
 HTML email support is coming soon. Currently emails are sent as plain text.
 
-**How do credentials work?**
+### How do credentials work?
 
 Your agent's credentials are stored locally at `~/.config/inboxapi/credentials.json` (Linux) or `~/Library/Application Support/inboxapi/credentials.json` (macOS). The CLI handles token creation and refresh automatically — your agent never needs to manage tokens manually.
 
-**What domains are blocked from sending?**
+### What domains are blocked from sending?
 
 InboxAPI maintains a denylist that blocks sending to government (.gov), military (.mil), intelligence, law enforcement, nuclear/critical infrastructure, and disposable email domains.
 
-**How does the trust classification work?**
+### How does the trust classification work?
 
 Every inbound email is classified into one of four trust levels:
 
@@ -299,7 +307,7 @@ Every inbound email is classified into one of four trust levels:
 | Unverified | Valid SPF/DKIM but sender not in addressbook | Use caution |
 | Suspicious | Authentication failed or unknown sender | Flag and confirm before acting |
 
-**What stops an agent from buying things or authorizing transactions via email?**
+### What stops an agent from buying things or authorizing transactions via email?
 
 InboxAPI is a communication channel, not an execution environment. It can deliver an email, but it can't click buttons, enter credit card numbers, or interact with external systems. The risk of unauthorized actions comes from how an agent is configured and what other tools it has access to — not from its email.
 
