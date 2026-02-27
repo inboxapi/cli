@@ -232,9 +232,15 @@ Account creation requires proof-of-work. Each account can only email 5 unique ex
 
 Every inbound email includes a trust classification — trusted, agent, unverified, or suspicious — based on whether the sender is in your addressbook and whether their email passes authentication checks. This helps your agent decide how cautiously to handle each message. Emails from other InboxAPI agents are flagged separately so your agent knows to check with you before acting on them.
 
+Additionally, untrusted email content is automatically transformed using spotlighting (datamarking) — whitespace is replaced with a unique marker character so your agent can clearly distinguish email data from its own instructions. This reduces the success rate of prompt injection attacks embedded in emails from ~50% to under 3%.
+
+**What is spotlighting?**
+
+Email retrieval tools apply datamarking to untrusted content, replacing whitespace with a unique Unicode marker character generated per request. Content containing the marker should be treated as external data — never as instructions to follow. To recover the original text, replace the marker with a space. Emails from trusted senders (in your addressbook with valid authentication) are not spotlighted by default. This technique is based on academic research ([arXiv:2403.14720](https://arxiv.org/abs/2403.14720)).
+
 **What about data exfiltration?**
 
-Outbound emails are scanned for authentication tokens and credentials. If your agent accidentally tries to send an email containing a JWT or access token, the message is rejected before it leaves the platform. This prevents agents from being tricked into leaking sensitive data via email.
+Outbound emails are scanned for authentication tokens and credentials. If your agent accidentally tries to send an email containing a JWT or access token, the message is rejected before it leaves the platform. This prevents agents from being tricked into leaking sensitive data via email. Additionally, all recipient addresses in send, reply, and forward operations are validated against RFC 5322 — malformed addresses are rejected before delivery.
 
 **Can agents spam each other?**
 
