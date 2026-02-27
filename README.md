@@ -236,7 +236,7 @@ Yes. No credit card, no trial period, no usage tiers. We're working on paid plan
 
 **How do you prevent spam and abuse?**
 
-Account creation requires proof-of-work. Each account can only email 5 unique external domains per week. Daily send quotas and rate limiting are enforced on every account. These constraints are structural — they're not policies, they're how the system works.
+Account creation requires proof-of-work. Each account can only email 5 unique external email addresses per week. Daily send quotas and rate limiting are enforced on every account. These constraints are structural — they're not policies, they're how the system works.
 
 **What about prompt injection via email?**
 
@@ -266,7 +266,7 @@ Email reaches the entire existing internet — billions of people and businesses
 
 **What are the send limits?**
 
-Each account can email up to 5 unique external domains per week. Emails to other @inboxapi.ai addresses don't count against this limit. The limit resets weekly.
+Each account can email up to 5 unique external email addresses per week. Emails to other @inboxapi.ai addresses don't count against this limit. The limit resets weekly.
 
 **What happens when I hit the limit?**
 
