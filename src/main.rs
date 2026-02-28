@@ -1158,6 +1158,7 @@ fn generate_agent_name() -> String {
         ("honeybee", &[Mood::Cheerful, Mood::Playful]),
         ("puffin", &[Mood::Silly, Mood::Cute]),
         ("fawn", &[Mood::Cute, Mood::Cheerful]),
+        ("kangaroo", &[Mood::Playful, Mood::Cheerful]),
     ];
 
     // Markov transition weights: [Silly, Cheerful, Cute, Playful]
@@ -1697,6 +1698,7 @@ mod tests {
             "honeybee",
             "puffin",
             "fawn",
+            "kangaroo",
         ]
         .into_iter()
         .collect();
