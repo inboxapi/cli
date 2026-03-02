@@ -390,6 +390,9 @@ async fn run_proxy(endpoint: String) -> Result<()> {
             }
         }
 
+        // Mutate report_bug / request_feature into send_email before token injection
+        mutate_feedback_tool(&mut msg, creds.as_ref());
+
         let method = msg
             .get("method")
             .and_then(|m| m.as_str())
@@ -899,6 +902,60 @@ fn is_whoami_call(msg: &Value) -> bool {
             .is_some_and(|n| n == "whoami")
 }
 
+fn mutate_feedback_tool(msg: &mut Value, creds: Option<&Credentials>) -> bool {
+    let is_tools_call = msg
+        .get("method")
+        .and_then(|m| m.as_str())
+        .is_some_and(|m| m == "tools/call");
+    if !is_tools_call {
+        return false;
+    }
+
+    let tool_name = msg
+        .get("params")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("");
+
+    let (to_addr, prefix) = match tool_name {
+        "report_bug" => ("bugs@inboxapi.dev", "[Bug Report] "),
+        "request_feature" => ("features@inboxapi.dev", "[Feature Request] "),
+        _ => return false,
+    };
+
+    let args = msg
+        .get("params")
+        .and_then(|p| p.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    let subject = args
+        .get("subject")
+        .and_then(|s| s.as_str())
+        .unwrap_or("(no subject)");
+    let body = args
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or("(no body)");
+
+    let mut new_args = json!({
+        "to": [to_addr],
+        "subject": format!("{}{}", prefix, subject),
+        "body": body,
+    });
+
+    if let Some(c) = creds {
+        new_args["from_name"] = json!(c.account_name);
+    }
+
+    if let Some(params) = msg.get_mut("params").and_then(|p| p.as_object_mut()) {
+        params.insert("name".to_string(), json!("send_email"));
+        params.insert("arguments".to_string(), new_args);
+    }
+
+    true
+}
+
 fn build_whoami_response(id: Value, creds: Option<&Credentials>) -> Value {
     let text = match creds {
         Some(c) => serde_json::to_string_pretty(&json!({
@@ -939,6 +996,25 @@ fn build_help_response(id: Value) -> Value {
     })
 }
 
+fn display_name_from_account(account_name: &str) -> String {
+    let sanitized = sanitize_for_description(account_name);
+    sanitized
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    format!("{}{}", upper, chars.as_str())
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn sanitize_for_description(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.' || *c == '@')
@@ -955,10 +1031,12 @@ fn inject_initialize_instructions(body: &str, creds: Option<&Credentials>) -> St
                 let name = sanitize_for_description(&c.account_name);
                 if let Some(ref email) = c.email {
                     let email = sanitize_for_description(email);
+                    let display = display_name_from_account(&c.account_name);
                     instructions.push_str(&format!(
                         " Your account name is '{}' and your InboxAPI email address is '{}'.\
-                         Always use '{}' as your from_name when sending emails.",
-                        name, email, name
+                         Always use '{}' as your from_name when sending emails.\
+                         When signing off emails, use '{}' as your name — do not sign as the AI model (e.g., Claude, Gemini).",
+                        name, email, name, display
                     ));
                 }
             }
@@ -989,7 +1067,8 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
         c.email.as_ref().map(|email| {
             let name = sanitize_for_description(&c.account_name);
             let email = sanitize_for_description(email);
-            (name, email)
+            let display = display_name_from_account(&c.account_name);
+            (name, email, display)
         })
     });
 
@@ -1006,15 +1085,15 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
                             obj.insert("description".to_string(), json!(AUTH_TOOL_OVERRIDE));
                         }
                     } else if IDENTITY_TOOLS.contains(&name) {
-                        if let Some((ref san_name, ref san_email)) = identity_suffix {
+                        if let Some((ref san_name, ref san_email, ref display)) = identity_suffix {
                             if let Some(obj) = tool.as_object_mut() {
                                 let existing = obj
                                     .get("description")
                                     .and_then(|d| d.as_str())
                                     .unwrap_or("");
                                 let new_desc = format!(
-                                    "{} Your account name is '{}' and your InboxAPI email is '{}'. Use '{}' as from_name.",
-                                    existing, san_name, san_email, san_name
+                                    "{}. Your account name is '{}' and your InboxAPI email is '{}'. Use '{}' as from_name. When signing off emails, use '{}' as your name — do not sign as the AI model (e.g., Claude, Gemini).",
+                                    existing, san_name, san_email, san_name, display
                                 );
                                 obj.insert("description".to_string(), json!(new_desc));
                             }
@@ -1039,7 +1118,7 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
 
             // Append local-only whoami tool
             let whoami_desc = match identity_suffix {
-                Some((ref name, ref email)) => format!(
+                Some((ref name, ref email, _)) => format!(
                     "Returns this agent's own identity. You are '{}' with email '{}'. This is the agent's mailbox, not the human user's personal email. To email the human, ask them for their address.",
                     name, email
                 ),
@@ -1052,6 +1131,44 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
                     "type": "object",
                     "properties": {},
                     "required": []
+                }
+            }));
+
+            // Append local-only feedback tools
+            tools.push(json!({
+                "name": "report_bug",
+                "description": "Report a bug with the InboxAPI service or API calls. Use this only for issues directly related to InboxAPI functionality (email sending/receiving, authentication, API errors). The report will be sent to bugs@inboxapi.dev.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {
+                            "type": "string",
+                            "description": "Brief summary of the bug"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Detailed description of the bug, including steps to reproduce"
+                        }
+                    },
+                    "required": ["subject", "body"]
+                }
+            }));
+            tools.push(json!({
+                "name": "request_feature",
+                "description": "Request a feature for the InboxAPI service or API. Use this only for feature requests directly related to InboxAPI functionality (email capabilities, API enhancements, new tools). The request will be sent to features@inboxapi.dev.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {
+                            "type": "string",
+                            "description": "Brief summary of the feature request"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Detailed description of the desired feature and use case"
+                        }
+                    },
+                    "required": ["subject", "body"]
                 }
             }));
 
@@ -1840,11 +1957,14 @@ mod tests {
         let parsed: Value = serde_json::from_str(&result).unwrap();
         let tools = parsed["result"]["tools"].as_array().unwrap();
 
-        // Auth tools should be rewritten; last tool is the injected whoami
-        for tool in tools.iter().filter(|t| t["name"] != "whoami") {
+        // Auth tools should be rewritten; injected tools are separate
+        for tool in tools.iter().filter(|t| {
+            !["whoami", "report_bug", "request_feature"].contains(&t["name"].as_str().unwrap_or(""))
+        }) {
             assert_eq!(tool["description"], AUTH_TOOL_OVERRIDE);
         }
-        assert_eq!(tools.last().unwrap()["name"], "whoami");
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"whoami"));
     }
 
     #[test]
@@ -1886,9 +2006,12 @@ mod tests {
         let result = rewrite_tools_list(body, None);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         let tools = parsed["result"]["tools"].as_array().unwrap();
-        // Only the injected whoami tool should be present
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "whoami");
+        // Only the injected local tools should be present
+        assert_eq!(tools.len(), 3);
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"whoami"));
+        assert!(names.contains(&"report_bug"));
+        assert!(names.contains(&"request_feature"));
     }
 
     #[test]
@@ -1948,6 +2071,16 @@ mod tests {
                 "tool {} missing email",
                 tools[i]["name"]
             );
+            assert!(
+                desc.contains("Cool Agent"),
+                "tool {} missing display name",
+                tools[i]["name"]
+            );
+            assert!(
+                desc.contains("do not sign as the AI model"),
+                "tool {} missing signing guidance",
+                tools[i]["name"]
+            );
         }
         // get_emails should NOT be annotated
         let get_desc = tools[3]["description"].as_str().unwrap();
@@ -1961,7 +2094,10 @@ mod tests {
         let result = rewrite_tools_list(&body, Some(&creds));
         let parsed: Value = serde_json::from_str(&result).unwrap();
         let tools = parsed["result"]["tools"].as_array().unwrap();
-        let whoami = tools.last().unwrap();
+        let whoami = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some("whoami"))
+            .unwrap();
         let desc = whoami["description"].as_str().unwrap();
         assert!(desc.contains("cool-agent"));
         assert!(desc.contains("cool-agent@inboxapi.io"));
@@ -1986,6 +2122,16 @@ mod tests {
         let long_input = "a".repeat(200);
         let result = sanitize_for_description(&long_input);
         assert_eq!(result.len(), 128);
+    }
+
+    #[test]
+    fn display_name_from_account_converts_hyphenated_names() {
+        assert_eq!(display_name_from_account("cool-agent"), "Cool Agent");
+        assert_eq!(
+            display_name_from_account("brooding-sinister-cat"),
+            "Brooding Sinister Cat"
+        );
+        assert_eq!(display_name_from_account("agent"), "Agent");
     }
 
     // --- creds without email edge case tests ---
@@ -2025,7 +2171,10 @@ mod tests {
         // send_email should NOT be annotated when email is missing
         assert_eq!(tools[0]["description"], "Send an email.");
         // whoami should use the default description
-        let whoami = tools.last().unwrap();
+        let whoami = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some("whoami"))
+            .unwrap();
         let desc = whoami["description"].as_str().unwrap();
         assert!(!desc.contains("no-email-agent"));
         assert!(desc.contains("Returns this agent's own identity:"));
@@ -2135,5 +2284,152 @@ mod tests {
             }
         });
         assert!(!is_token_expired_error(&resp));
+    }
+
+    // --- mutate_feedback_tool tests ---
+
+    #[test]
+    fn mutate_feedback_tool_rewrites_report_bug() {
+        let creds = make_test_creds();
+        let mut msg = make_tools_call(
+            "report_bug",
+            json!({"subject": "Login fails", "body": "Steps to reproduce..."}),
+        );
+        assert!(mutate_feedback_tool(&mut msg, Some(&creds)));
+        assert_eq!(msg["params"]["name"], "send_email");
+        assert_eq!(msg["params"]["arguments"]["to"][0], "bugs@inboxapi.dev");
+        assert_eq!(
+            msg["params"]["arguments"]["subject"],
+            "[Bug Report] Login fails"
+        );
+        assert_eq!(msg["params"]["arguments"]["body"], "Steps to reproduce...");
+        assert_eq!(msg["params"]["arguments"]["from_name"], "cool-agent");
+    }
+
+    #[test]
+    fn mutate_feedback_tool_rewrites_request_feature() {
+        let creds = make_test_creds();
+        let mut msg = make_tools_call(
+            "request_feature",
+            json!({"subject": "Add labels", "body": "Would be nice..."}),
+        );
+        assert!(mutate_feedback_tool(&mut msg, Some(&creds)));
+        assert_eq!(msg["params"]["name"], "send_email");
+        assert_eq!(msg["params"]["arguments"]["to"][0], "features@inboxapi.dev");
+        assert_eq!(
+            msg["params"]["arguments"]["subject"],
+            "[Feature Request] Add labels"
+        );
+    }
+
+    #[test]
+    fn mutate_feedback_tool_ignores_other_tools() {
+        let mut msg = make_tools_call("get_emails", json!({"limit": 10}));
+        let original = msg.clone();
+        assert!(!mutate_feedback_tool(&mut msg, None));
+        assert_eq!(msg, original);
+    }
+
+    #[test]
+    fn mutate_feedback_tool_ignores_non_tools_call() {
+        let mut msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+        let original = msg.clone();
+        assert!(!mutate_feedback_tool(&mut msg, None));
+        assert_eq!(msg, original);
+    }
+
+    #[test]
+    fn mutate_feedback_tool_handles_missing_args() {
+        let mut msg = make_tools_call("report_bug", json!({}));
+        assert!(mutate_feedback_tool(&mut msg, None));
+        assert_eq!(
+            msg["params"]["arguments"]["subject"],
+            "[Bug Report] (no subject)"
+        );
+        assert_eq!(msg["params"]["arguments"]["body"], "(no body)");
+    }
+
+    #[test]
+    fn mutate_feedback_tool_without_creds() {
+        let mut msg = make_tools_call("report_bug", json!({"subject": "Bug", "body": "Details"}));
+        assert!(mutate_feedback_tool(&mut msg, None));
+        assert_eq!(msg["params"]["name"], "send_email");
+        assert!(msg["params"]["arguments"]["from_name"].is_null());
+    }
+
+    #[test]
+    fn mutate_feedback_tool_no_stale_token() {
+        let creds = make_test_creds();
+        let mut msg = make_tools_call(
+            "report_bug",
+            json!({"subject": "Bug", "body": "Details", "token": "old-token"}),
+        );
+        assert!(mutate_feedback_tool(&mut msg, Some(&creds)));
+        // Old arguments (including token) should not carry over
+        assert!(msg["params"]["arguments"]["token"].is_null());
+    }
+
+    // --- rewrite_tools_list feedback tool tests ---
+
+    #[test]
+    fn rewrite_tools_list_injects_feedback_tools() {
+        let body = make_tools_list_response(vec![]);
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let tools = parsed["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"report_bug"));
+        assert!(names.contains(&"request_feature"));
+    }
+
+    #[test]
+    fn rewrite_tools_list_feedback_tool_schemas() {
+        let body = make_tools_list_response(vec![]);
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let tools = parsed["result"]["tools"].as_array().unwrap();
+
+        for name in &["report_bug", "request_feature"] {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"].as_str() == Some(name))
+                .unwrap();
+            let schema = &tool["inputSchema"];
+            assert_eq!(schema["type"], "object");
+            let props = schema["properties"].as_object().unwrap();
+            assert!(props.contains_key("subject"));
+            assert!(props.contains_key("body"));
+            assert_eq!(props["subject"]["type"], "string");
+            assert_eq!(props["body"]["type"], "string");
+            let required = schema["required"].as_array().unwrap();
+            assert!(required.contains(&json!("subject")));
+            assert!(required.contains(&json!("body")));
+        }
+    }
+
+    #[test]
+    fn rewrite_tools_list_feedback_descriptions_scoped() {
+        let body = make_tools_list_response(vec![]);
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let tools = parsed["result"]["tools"].as_array().unwrap();
+
+        for name in &["report_bug", "request_feature"] {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"].as_str() == Some(name))
+                .unwrap();
+            let desc = tool["description"].as_str().unwrap();
+            assert!(
+                desc.contains("InboxAPI"),
+                "{} description should mention InboxAPI",
+                name
+            );
+        }
     }
 }
