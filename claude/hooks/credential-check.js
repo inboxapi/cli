@@ -17,6 +17,12 @@ function findCredentials() {
       path.join(home, "Library", "Application Support", "inboxapi", "credentials.json"),
     );
   }
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || "";
+    const localAppData = process.env.LOCALAPPDATA || "";
+    if (appData) candidates.push(path.join(appData, "inboxapi", "credentials.json"));
+    if (localAppData) candidates.push(path.join(localAppData, "inboxapi", "credentials.json"));
+  }
   candidates.push(path.join(home, ".config", "inboxapi", "credentials.json"));
   candidates.push(
     path.join(home, ".local", "inboxapi", "credentials.json"),

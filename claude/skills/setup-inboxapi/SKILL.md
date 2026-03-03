@@ -61,5 +61,6 @@ Configure InboxAPI email tools for this Claude Code project.
 
 ## Notes
 
-- This skill is safe to run multiple times — it won't duplicate entries
-- Existing `.mcp.json` and `.claude/settings.json` entries are preserved
+- This skill is safe to run multiple times — it won't duplicate entries or overwrite local edits
+- Existing `.mcp.json`, `.claude/settings.json`, skill files, and hook files are preserved
+- Files with local edits are skipped; unmodified files are reported as up to date
