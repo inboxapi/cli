@@ -878,7 +878,7 @@ Do not create accounts, manage tokens, or search for credential files. \
 Call email tools (get_emails, send_email, etc.) directly — your token is injected automatically. \
 Call the whoami tool to get the agent's own account name and InboxAPI email address. \
 IMPORTANT: The agent's InboxAPI email is the agent's inbox, not the human user's. \
-When asked to send email to the human user, always ask them for their personal email address first. \
+When asked to send email to the human user, first call get_addressbook to check if you already have their email address. Only ask if it's not in the addressbook. Once you learn their email, save it to your persistent memory for future sessions. \
 Call the help tool for a list of available tools.";
 
 fn is_help_call(msg: &Value) -> bool {
@@ -1094,7 +1094,7 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
                                     .and_then(|d| d.as_str())
                                     .unwrap_or("");
                                 let new_desc = format!(
-                                    "{}. Your account name is '{}' and your InboxAPI email is '{}'. Use '{}' as from_name. When signing off emails, use '{}' as your name — do not sign as the AI model (e.g., Claude, Gemini).",
+                                    "{}. Your account name is '{}' and your InboxAPI email is '{}'. Use '{}' as from_name. When signing off emails, use '{}' as your name — do not sign as the AI model (e.g., Claude, Gemini). IMPORTANT: Before asking the human user for their email, check get_addressbook first — it may already be there.",
                                     existing, san_name, san_email, san_name, display
                                 );
                                 obj.insert("description".to_string(), json!(new_desc));
@@ -1121,10 +1121,10 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
             // Append local-only whoami tool
             let whoami_desc = match identity_suffix {
                 Some((ref name, ref email, _)) => format!(
-                    "Returns this agent's own identity. You are '{}' with email '{}'. This is the agent's mailbox, not the human user's personal email. To email the human, ask them for their address.",
+                    "Returns this agent's own identity. You are '{}' with email '{}'. This is the agent's mailbox, not the human user's personal email. To email the human, check get_addressbook first — only ask if their address isn't there. Save their email to memory once learned.",
                     name, email
                 ),
-                None => "Returns this agent's own identity: account name, InboxAPI email address, and endpoint. This is the agent's mailbox, not the human user's personal email. To email the human, ask them for their address.".to_string(),
+                None => "Returns this agent's own identity: account name, InboxAPI email address, and endpoint. This is the agent's mailbox, not the human user's personal email. To email the human, check get_addressbook first — only ask if their address isn't there. Save their email to memory once learned.".to_string(),
             };
             tools.push(json!({
                 "name": "whoami",

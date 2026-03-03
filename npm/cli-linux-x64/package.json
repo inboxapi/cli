@@ -1,6 +1,6 @@
 {
   "name": "@inboxapi/cli-linux-x64",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "InboxAPI CLI binary for Linux x64",
   "os": [
     "linux"
