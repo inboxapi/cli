@@ -52,7 +52,8 @@ enum Commands {
     },
     /// Install Claude Code skills and hooks into the current project
     SetupSkills {
-        /// Overwrite existing skill and hook files even if they have local edits
+        /// Overwrite existing skill and hook files even if they have local edits.
+        /// Note: .claude/settings.json is always merged (not overwritten) regardless of this flag.
         #[arg(long)]
         force: bool,
     },
@@ -605,10 +606,16 @@ fn merge_hook_settings(settings_path: &Path) -> Result<String> {
                             .and_then(|m| m.as_str())
                             .unwrap_or("");
 
-                        // Find existing entry with the same matcher
-                        let existing_match = existing_arr.iter_mut().find(|e| {
-                            e.get("matcher").and_then(|m| m.as_str()).unwrap_or("") == matcher
-                        });
+                        // Only merge by matcher when the new entry has a non-empty matcher;
+                        // entries without a matcher are always appended to avoid
+                        // incorrectly merging unrelated hook entries together.
+                        let existing_match = if matcher.is_empty() {
+                            None
+                        } else {
+                            existing_arr.iter_mut().find(|e| {
+                                e.get("matcher").and_then(|m| m.as_str()).unwrap_or("") == matcher
+                            })
+                        };
 
                         if let Some(existing_entry) = existing_match {
                             // Merge hooks at the individual command level
