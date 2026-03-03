@@ -7,7 +7,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cmp::Ordering;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser)]
@@ -49,6 +49,13 @@ enum Commands {
     Restore {
         /// Source folder containing the backup
         folder: String,
+    },
+    /// Install Claude Code skills and hooks into the current project
+    SetupSkills {
+        /// Overwrite existing skill and hook files even if they have local edits.
+        /// Note: .claude/settings.json is always merged (not overwritten) regardless of this flag.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -395,6 +402,269 @@ fn restore_credentials(folder: &str) -> Result<()> {
     Ok(())
 }
 
+// --- Embedded Claude Code skills and hooks ---
+
+static SKILLS: &[(&str, &str)] = &[
+    (
+        "check-inbox",
+        include_str!("../claude/skills/check-inbox/SKILL.md"),
+    ),
+    ("compose", include_str!("../claude/skills/compose/SKILL.md")),
+    (
+        "email-search",
+        include_str!("../claude/skills/email-search/SKILL.md"),
+    ),
+    (
+        "email-reply",
+        include_str!("../claude/skills/email-reply/SKILL.md"),
+    ),
+    (
+        "email-digest",
+        include_str!("../claude/skills/email-digest/SKILL.md"),
+    ),
+    (
+        "email-forward",
+        include_str!("../claude/skills/email-forward/SKILL.md"),
+    ),
+    (
+        "setup-inboxapi",
+        include_str!("../claude/skills/setup-inboxapi/SKILL.md"),
+    ),
+];
+
+static HOOKS: &[(&str, &str)] = &[
+    (
+        "email-send-guard.js",
+        include_str!("../claude/hooks/email-send-guard.js"),
+    ),
+    (
+        "email-activity-logger.js",
+        include_str!("../claude/hooks/email-activity-logger.js"),
+    ),
+    (
+        "credential-check.js",
+        include_str!("../claude/hooks/credential-check.js"),
+    ),
+];
+
+static HOOKS_SETTINGS: &str = r#"{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__inboxapi__send_email|mcp__inboxapi__send_reply|mcp__inboxapi__forward_email",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/email-send-guard.js",
+            "statusMessage": "Reviewing outbound email..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__inboxapi__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/email-activity-logger.js"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/credential-check.js",
+            "statusMessage": "Checking InboxAPI credentials..."
+          }
+        ]
+      }
+    ]
+  }
+}"#;
+
+fn setup_skills(force: bool) -> Result<()> {
+    let base = PathBuf::from(".claude");
+
+    // Write skills (skip if on-disk content already matches, unless --force)
+    for (name, content) in SKILLS {
+        let dir = base.join("skills").join(name);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+        let path = dir.join("SKILL.md");
+        if path.exists() && !force {
+            let existing = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read existing {}", path.display()))?;
+            if existing == *content {
+                println!("  Up to date:      /{}  ({})", name, path.display());
+                continue;
+            }
+            println!(
+                "  Skipped (file differs from bundled version): /{}  ({})",
+                name,
+                path.display()
+            );
+            println!("    Use --force to overwrite");
+            continue;
+        }
+        std::fs::write(&path, content)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        println!("  Installed skill: /{}  ({})", name, path.display());
+    }
+
+    // Write hooks (skip if on-disk content already matches, unless --force)
+    let hooks_dir = base.join("hooks");
+    std::fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("Failed to create directory {}", hooks_dir.display()))?;
+    for (name, content) in HOOKS {
+        let path = hooks_dir.join(name);
+        if path.exists() && !force {
+            let existing = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read existing {}", path.display()))?;
+            if existing == *content {
+                println!("  Up to date:      {}", path.display());
+            } else {
+                println!(
+                    "  Skipped (file differs from bundled version): {}",
+                    path.display()
+                );
+                println!("    Use --force to overwrite");
+            }
+            continue;
+        }
+        std::fs::write(&path, content)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        println!("  Installed hook:  {}", path.display());
+    }
+
+    // Merge hook settings into .claude/settings.json
+    let settings_path = base.join("settings.json");
+    let merged = merge_hook_settings(&settings_path)?;
+    std::fs::write(&settings_path, merged)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+    println!("  Updated:         {}", settings_path.display());
+
+    println!();
+    println!("InboxAPI Claude Code skills and hooks installed successfully.");
+    println!("Available skills: /check-inbox, /compose, /email-search, /email-reply, /email-digest, /email-forward, /setup-inboxapi");
+    Ok(())
+}
+
+fn merge_hook_settings(settings_path: &Path) -> Result<String> {
+    let new_settings: Value =
+        serde_json::from_str(HOOKS_SETTINGS).context("Failed to parse embedded hook settings")?;
+
+    let mut existing: Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content).with_context(|| {
+            format!(
+                "Failed to parse existing settings from {}",
+                settings_path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+
+    // Ensure root is an object
+    if !existing.is_object() {
+        anyhow::bail!(
+            "{} is not a JSON object — cannot merge hook settings",
+            settings_path.display()
+        );
+    }
+
+    // Merge hooks: for each event type, merge at the individual hook level
+    if let Some(new_hooks) = new_settings.get("hooks").and_then(|h| h.as_object()) {
+        let existing_hooks = existing
+            .as_object_mut()
+            .unwrap()
+            .entry("hooks")
+            .or_insert_with(|| json!({}));
+        if !existing_hooks.is_object() {
+            anyhow::bail!(
+                "{} has a 'hooks' key that is not a JSON object — cannot merge hook settings",
+                settings_path.display()
+            );
+        }
+        if let Some(existing_hooks_obj) = existing_hooks.as_object_mut() {
+            for (event, new_entries) in new_hooks {
+                let existing_entries = existing_hooks_obj.entry(event).or_insert_with(|| json!([]));
+                // Coerce non-array values into an array
+                if !existing_entries.is_array() {
+                    let previous_value = existing_entries.clone();
+                    *existing_entries = json!([previous_value]);
+                }
+                if let (Some(existing_arr), Some(new_arr)) =
+                    (existing_entries.as_array_mut(), new_entries.as_array())
+                {
+                    for new_entry in new_arr {
+                        let matcher = new_entry
+                            .get("matcher")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("");
+
+                        // Only merge by matcher when the new entry has a non-empty matcher;
+                        // entries without a matcher are always appended to avoid
+                        // incorrectly merging unrelated hook entries together.
+                        let existing_match = if matcher.is_empty() {
+                            None
+                        } else {
+                            existing_arr.iter_mut().find(|e| {
+                                e.get("matcher").and_then(|m| m.as_str()).unwrap_or("") == matcher
+                            })
+                        };
+
+                        if let Some(existing_entry) = existing_match {
+                            // Merge hooks at the individual command level
+                            if let Some(new_hooks_arr) =
+                                new_entry.get("hooks").and_then(|h| h.as_array())
+                            {
+                                let entry_hooks = existing_entry
+                                    .as_object_mut()
+                                    .map(|obj| obj.entry("hooks").or_insert_with(|| json!([])));
+                                if let Some(entry_hooks_val) = entry_hooks {
+                                    // Coerce non-array hooks into an array
+                                    if !entry_hooks_val.is_array() {
+                                        let old_value = entry_hooks_val.clone();
+                                        *entry_hooks_val = json!([old_value]);
+                                    }
+                                    if let Some(entry_hooks_arr) = entry_hooks_val.as_array_mut() {
+                                        for new_hook in new_hooks_arr {
+                                            let new_cmd = new_hook
+                                                .get("command")
+                                                .and_then(|c| c.as_str())
+                                                .unwrap_or("");
+                                            let hook_exists = entry_hooks_arr.iter().any(|h| {
+                                                h.get("command")
+                                                    .and_then(|c| c.as_str())
+                                                    .unwrap_or("")
+                                                    == new_cmd
+                                            });
+                                            if !hook_exists {
+                                                entry_hooks_arr.push(new_hook.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            existing_arr.push(new_entry.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    serde_json::to_string_pretty(&existing).context("Failed to serialize settings")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -414,6 +684,7 @@ async fn main() -> Result<()> {
         Some(Commands::Reset) => reset_credentials(),
         Some(Commands::Backup { folder }) => backup_credentials(&folder),
         Some(Commands::Restore { folder }) => restore_credentials(&folder),
+        Some(Commands::SetupSkills { force }) => setup_skills(force),
         None => {
             // Prefer the endpoint stored in credentials, if available; fall back to CLI default.
             let endpoint = match load_credentials() {
@@ -2858,5 +3129,84 @@ mod tests {
     fn drain_sse_remainder_filters_non_message_events() {
         let buf = "event: ping\ndata: {}";
         assert!(drain_sse_remainder(buf).is_none());
+    }
+
+    // --- merge_hook_settings tests ---
+
+    fn temp_settings_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("inboxapi_test_{name}_{}.json", std::process::id()))
+    }
+
+    #[test]
+    fn merge_hook_settings_creates_settings_when_missing() {
+        let p = temp_settings_path("create");
+        let _ = std::fs::remove_file(&p);
+        let result = merge_hook_settings(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("hooks").is_some());
+    }
+
+    #[test]
+    fn merge_hook_settings_preserves_existing_keys() {
+        let p = temp_settings_path("preserve");
+        std::fs::write(&p, r#"{"customKey": "value"}"#).unwrap();
+        let result = merge_hook_settings(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["customKey"], "value");
+        assert!(parsed.get("hooks").is_some());
+    }
+
+    #[test]
+    fn merge_hook_settings_does_not_duplicate_hooks() {
+        let p = temp_settings_path("nodupe");
+        let _ = std::fs::remove_file(&p);
+        let first = merge_hook_settings(&p).unwrap();
+        std::fs::write(&p, &first).unwrap();
+        let second = merge_hook_settings(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn merge_hook_settings_errors_on_invalid_json() {
+        let p = temp_settings_path("invalid");
+        std::fs::write(&p, "not valid json").unwrap();
+        let result = merge_hook_settings(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_hook_settings_errors_on_non_object_root() {
+        let p = temp_settings_path("nonobj");
+        std::fs::write(&p, "[1, 2, 3]").unwrap();
+        let result = merge_hook_settings(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_hook_settings_errors_on_non_object_hooks() {
+        let p = temp_settings_path("nonobjhooks");
+        std::fs::write(&p, r#"{"hooks": "not an object"}"#).unwrap();
+        let result = merge_hook_settings(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_hook_settings_coerces_non_array_event_entries() {
+        let p = temp_settings_path("coerce");
+        std::fs::write(
+            &p,
+            r#"{"hooks": {"PreToolUse": {"matcher": "old", "hooks": []}}}"#,
+        )
+        .unwrap();
+        let result = merge_hook_settings(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed["hooks"]["PreToolUse"].is_array());
     }
 }
