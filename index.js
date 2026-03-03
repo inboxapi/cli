@@ -3,45 +3,6 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const https = require('https');
-
-function compareVersions(a, b) {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    const na = pa[i] || 0;
-    const nb = pb[i] || 0;
-    if (na < nb) return -1;
-    if (na > nb) return 1;
-  }
-  return 0;
-}
-
-function checkForUpdates() {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
-    const localVersion = pkg.version;
-    if (!localVersion) return;
-
-    const req = https.get('https://registry.npmjs.org/@inboxapi/cli/latest', { timeout: 3000 }, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const remote = JSON.parse(data);
-          const remoteVersion = remote.version;
-          if (remoteVersion && compareVersions(localVersion, remoteVersion) < 0) {
-            process.stderr.write(
-              `[inboxapi] Update available: ${localVersion} → ${remoteVersion}. Run: npm install -g @inboxapi/cli@${remoteVersion}\n`
-            );
-          }
-        } catch {}
-      });
-    });
-    req.on('error', () => {});
-    req.on('timeout', () => { req.destroy(); });
-  } catch {}
-}
 
 const PLATFORM_PACKAGES = {
   'darwin-arm64': '@inboxapi/cli-darwin-arm64',
@@ -78,13 +39,6 @@ function findBinary() {
 
 const binPath = findBinary();
 const args = process.argv.slice(2);
-
-// Auto-update check for proxy mode only (default, no subcommand, or explicit "proxy")
-const firstArg = args[0];
-const isProxyMode = !firstArg || firstArg === 'proxy' || firstArg.startsWith('--endpoint');
-if (isProxyMode) {
-  checkForUpdates();
-}
 
 if (binPath) {
   const child = spawn(binPath, args, { stdio: 'inherit' });

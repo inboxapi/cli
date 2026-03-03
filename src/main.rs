@@ -6,6 +6,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -98,6 +99,115 @@ fn get_credentials_search_paths() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VersionCache {
+    latest_version: String,
+    checked_at: String,
+}
+
+fn get_version_cache_path() -> Result<PathBuf> {
+    let base_dir =
+        dirs::config_dir().ok_or_else(|| anyhow!("Could not determine configuration directory"))?;
+    Ok(base_dir.join("inboxapi").join("version-check.json"))
+}
+
+async fn read_version_cache() -> Option<VersionCache> {
+    let path = get_version_cache_path().ok()?;
+    let content = tokio::fs::read_to_string(path).await.ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+async fn write_version_cache(latest_version: &str) -> Result<()> {
+    let path = get_version_cache_path()?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let cache = VersionCache {
+        latest_version: latest_version.to_string(),
+        checked_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let content = serde_json::to_string_pretty(&cache)?;
+    tokio::fs::write(path, content).await?;
+    Ok(())
+}
+
+fn is_cache_stale(cache: &VersionCache) -> bool {
+    let Ok(checked) = chrono::DateTime::parse_from_rfc3339(&cache.checked_at) else {
+        return true;
+    };
+    let age = chrono::Utc::now().signed_duration_since(checked);
+    // Treat future timestamps as stale (clock skew or tampering)
+    age.num_seconds() < 0 || age.num_hours() >= 24
+}
+
+fn compare_versions(a: &str, b: &str) -> Ordering {
+    let parse = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    let pa = parse(a);
+    let pb = parse(b);
+    for i in 0..3 {
+        let na = pa.get(i).copied().unwrap_or(0);
+        let nb = pb.get(i).copied().unwrap_or(0);
+        match na.cmp(&nb) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    Ordering::Equal
+}
+
+fn is_newer(candidate: &str, current: &str) -> bool {
+    compare_versions(candidate, current) == Ordering::Greater
+}
+
+async fn fetch_latest_version(client: &HttpClient) -> Option<String> {
+    let resp = client
+        .get("https://registry.npmjs.org/@inboxapi/cli/latest")
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?;
+    let data: Value = resp.json().await.ok()?;
+    data["version"].as_str().map(String::from)
+}
+
+async fn check_for_update(client: &HttpClient, current_version: &str) -> Option<String> {
+    let cache = read_version_cache().await;
+    if let Some(ref c) = cache {
+        if !is_cache_stale(c) {
+            return if is_newer(&c.latest_version, current_version) {
+                Some(c.latest_version.clone())
+            } else {
+                None
+            };
+        }
+    }
+    let latest = fetch_latest_version(client).await?;
+    let _ = write_version_cache(&latest).await;
+    if is_newer(&latest, current_version) {
+        Some(latest)
+    } else {
+        None
+    }
+}
+
+async fn version_check_loop(
+    client: HttpClient,
+    current_version: String,
+    tx: tokio::sync::watch::Sender<Option<String>>,
+) {
+    if let Some(latest) = check_for_update(&client, &current_version).await {
+        let _ = tx.send(Some(latest));
+    }
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+    interval.tick().await; // consume immediate tick
+    loop {
+        interval.tick().await;
+        if let Some(latest) = check_for_update(&client, &current_version).await {
+            let _ = tx.send(Some(latest));
+        }
+    }
 }
 
 fn load_credentials() -> Result<Credentials> {
@@ -424,6 +534,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
         }
     }
 
+    // Start background version check
+    let (version_tx, version_rx) = tokio::sync::watch::channel(None);
+    {
+        let client = http_client.clone();
+        let current = env!("CARGO_PKG_VERSION").to_string();
+        tokio::spawn(version_check_loop(client, current, version_tx));
+    }
+    let mut last_notified_version: Option<String> = None;
+
     // Handle stdin -> POST, read responses as Streamable HTTP (JSON or SSE)
     let mut out = stdout();
     let mut lines = BufReader::new(stdin()).lines();
@@ -506,7 +625,7 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         }
                     };
 
-                    let final_response = if is_token_expired_error(&response) {
+                    let mut final_response = if is_token_expired_error(&response) {
                         if let Some(current_creds) = creds.clone() {
                             eprintln!("[inboxapi] Token expired. Attempting refresh...");
                             match reauth_with_fallback(&current_creds, &endpoint, &http_client)
@@ -555,6 +674,17 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                     } else {
                         response
                     };
+
+                    // Inject version update notice for tools/call
+                    {
+                        let update = version_rx.borrow().clone();
+                        if let Some(ref latest) = update {
+                            if update != last_notified_version {
+                                inject_update_notice(&mut final_response, latest);
+                                last_notified_version = update;
+                            }
+                        }
+                    }
 
                     let body = serde_json::to_string(&final_response)?;
                     out.write_all(format!("{}\n", body).as_bytes()).await?;
@@ -614,7 +744,12 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                             for event in drain_sse_events(&mut buf) {
                                 let mut data = event.data;
                                 if method == "initialize" {
-                                    data = inject_initialize_instructions(&data, creds.as_ref());
+                                    let update = version_rx.borrow().clone();
+                                    data = inject_initialize_instructions(
+                                        &data,
+                                        creds.as_ref(),
+                                        update.as_deref(),
+                                    );
                                 }
                                 if method == "tools/list" {
                                     data = rewrite_tools_list(&data, creds.as_ref());
@@ -627,7 +762,12 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         if let Some(event) = drain_sse_remainder(&buf) {
                             let mut data = event.data;
                             if method == "initialize" {
-                                data = inject_initialize_instructions(&data, creds.as_ref());
+                                let update = version_rx.borrow().clone();
+                                data = inject_initialize_instructions(
+                                    &data,
+                                    creds.as_ref(),
+                                    update.as_deref(),
+                                );
                             }
                             if method == "tools/list" {
                                 data = rewrite_tools_list(&data, creds.as_ref());
@@ -639,7 +779,12 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         let mut body = resp.text().await.unwrap_or_default();
                         if !body.is_empty() && !is_notification {
                             if method == "initialize" {
-                                body = inject_initialize_instructions(&body, creds.as_ref());
+                                let update = version_rx.borrow().clone();
+                                body = inject_initialize_instructions(
+                                    &body,
+                                    creds.as_ref(),
+                                    update.as_deref(),
+                                );
                             }
                             if method == "tools/list" {
                                 body = rewrite_tools_list(&body, creds.as_ref());
@@ -1024,7 +1169,11 @@ fn sanitize_for_description(s: &str) -> String {
         .collect()
 }
 
-fn inject_initialize_instructions(body: &str, creds: Option<&Credentials>) -> String {
+fn inject_initialize_instructions(
+    body: &str,
+    creds: Option<&Credentials>,
+    update_available: Option<&str>,
+) -> String {
     if let Ok(mut parsed) = serde_json::from_str::<Value>(body) {
         if let Some(result) = parsed.get_mut("result").and_then(|r| r.as_object_mut()) {
             let mut instructions = INITIALIZE_INSTRUCTIONS.to_string();
@@ -1042,11 +1191,39 @@ fn inject_initialize_instructions(body: &str, creds: Option<&Credentials>) -> St
                     ));
                 }
             }
+            if let Some(latest) = update_available {
+                instructions.push_str(&format!(
+                    " IMPORTANT: The InboxAPI CLI is outdated (current: {}, latest: {}). \
+                     Inform the user that an update is available and suggest running: \
+                     npm install -g @inboxapi/cli@latest",
+                    env!("CARGO_PKG_VERSION"),
+                    latest
+                ));
+            }
             result.insert("instructions".to_string(), json!(instructions));
             return serde_json::to_string(&parsed).unwrap_or_else(|_| body.to_string());
         }
     }
     body.to_string()
+}
+
+fn inject_update_notice(response: &mut Value, latest_version: &str) {
+    let notice = format!(
+        "[InboxAPI Update] Version {} is available (current: {}). \
+         Please inform the user to update by running: npm install -g @inboxapi/cli@latest",
+        latest_version,
+        env!("CARGO_PKG_VERSION")
+    );
+    if let Some(content) = response
+        .get_mut("result")
+        .and_then(|r| r.get_mut("content"))
+        .and_then(|c| c.as_array_mut())
+    {
+        content.push(json!({
+            "type": "text",
+            "text": notice
+        }));
+    }
 }
 
 const AUTH_TOOL_OVERRIDE: &str = "Handled automatically by the CLI proxy. Do not call directly.";
@@ -1894,7 +2071,7 @@ mod tests {
     #[test]
     fn inject_initialize_instructions_adds_field() {
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
-        let modified = inject_initialize_instructions(body, None);
+        let modified = inject_initialize_instructions(body, None, None);
         let parsed: Value = serde_json::from_str(&modified).unwrap();
         let instructions = parsed["result"]["instructions"].as_str().unwrap();
         assert!(instructions.contains("handled automatically"));
@@ -1903,7 +2080,7 @@ mod tests {
     #[test]
     fn inject_initialize_instructions_preserves_existing_fields() {
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}},"serverInfo":{"name":"test"}}}"#;
-        let modified = inject_initialize_instructions(body, None);
+        let modified = inject_initialize_instructions(body, None, None);
         let parsed: Value = serde_json::from_str(&modified).unwrap();
         assert_eq!(parsed["result"]["serverInfo"]["name"], "test");
         assert!(parsed["result"]["capabilities"]["tools"].is_object());
@@ -1913,7 +2090,7 @@ mod tests {
     #[test]
     fn inject_initialize_instructions_returns_unchanged_on_invalid_json() {
         let body = "not valid json";
-        let result = inject_initialize_instructions(body, None);
+        let result = inject_initialize_instructions(body, None, None);
         assert_eq!(result, "not valid json");
     }
 
@@ -1927,7 +2104,7 @@ mod tests {
             email: Some("test-agent@inboxapi.io".to_string()),
         };
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
-        let modified = inject_initialize_instructions(body, Some(&creds));
+        let modified = inject_initialize_instructions(body, Some(&creds), None);
         let parsed: Value = serde_json::from_str(&modified).unwrap();
         let instructions = parsed["result"]["instructions"].as_str().unwrap();
         assert!(instructions.contains("test-agent"));
@@ -2032,7 +2209,7 @@ mod tests {
     #[test]
     fn inject_initialize_instructions_returns_unchanged_without_result() {
         let body = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"fail"}}"#;
-        let result = inject_initialize_instructions(body, None);
+        let result = inject_initialize_instructions(body, None, None);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert!(parsed["result"]["instructions"].is_null());
     }
@@ -2152,7 +2329,7 @@ mod tests {
     fn inject_initialize_instructions_with_creds_no_email_skips_identity() {
         let creds = make_creds_without_email();
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
-        let modified = inject_initialize_instructions(body, Some(&creds));
+        let modified = inject_initialize_instructions(body, Some(&creds), None);
         let parsed: Value = serde_json::from_str(&modified).unwrap();
         let instructions = parsed["result"]["instructions"].as_str().unwrap();
         assert!(instructions.contains("handled automatically"));
@@ -2433,6 +2610,165 @@ mod tests {
                 name
             );
         }
+    }
+
+    // --- version comparison tests ---
+
+    #[test]
+    fn compare_versions_equal() {
+        assert_eq!(compare_versions("1.2.3", "1.2.3"), Ordering::Equal);
+    }
+
+    #[test]
+    fn compare_versions_newer() {
+        assert_eq!(compare_versions("1.2.4", "1.2.3"), Ordering::Greater);
+    }
+
+    #[test]
+    fn compare_versions_older() {
+        assert_eq!(compare_versions("1.2.3", "1.2.4"), Ordering::Less);
+    }
+
+    #[test]
+    fn compare_versions_major_diff() {
+        assert_eq!(compare_versions("2.0.0", "1.9.9"), Ordering::Greater);
+    }
+
+    #[test]
+    fn is_newer_true() {
+        assert!(is_newer("1.1.0", "1.0.0"));
+    }
+
+    #[test]
+    fn is_newer_false_equal() {
+        assert!(!is_newer("1.0.0", "1.0.0"));
+    }
+
+    #[test]
+    fn is_newer_false_older() {
+        assert!(!is_newer("0.9.0", "1.0.0"));
+    }
+
+    // --- inject_update_notice tests ---
+
+    #[test]
+    fn inject_update_notice_appends_content() {
+        let mut response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "original"}]
+            }
+        });
+        inject_update_notice(&mut response, "2.0.0");
+        let content = response["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        let notice = content[1]["text"].as_str().unwrap();
+        assert!(notice.contains("2.0.0"));
+        assert!(notice.contains("npm install"));
+    }
+
+    #[test]
+    fn inject_update_notice_preserves_existing() {
+        let mut response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"}
+                ]
+            }
+        });
+        inject_update_notice(&mut response, "3.0.0");
+        let content = response["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["text"], "first");
+        assert_eq!(content[1]["text"], "second");
+        assert!(content[2]["text"].as_str().unwrap().contains("3.0.0"));
+    }
+
+    #[test]
+    fn inject_update_notice_handles_missing_content() {
+        let mut response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {}
+        });
+        inject_update_notice(&mut response, "2.0.0");
+        // Should not crash; no content array to append to
+        assert!(response["result"]["content"].is_null());
+    }
+
+    // --- inject_initialize_instructions with update ---
+
+    #[test]
+    fn inject_initialize_instructions_with_update() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
+        let modified = inject_initialize_instructions(body, None, Some("2.0.0"));
+        let parsed: Value = serde_json::from_str(&modified).unwrap();
+        let instructions = parsed["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("outdated"));
+        assert!(instructions.contains("2.0.0"));
+        assert!(instructions.contains("npm install"));
+    }
+
+    #[test]
+    fn inject_initialize_instructions_without_update() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
+        let modified = inject_initialize_instructions(body, None, None);
+        let parsed: Value = serde_json::from_str(&modified).unwrap();
+        let instructions = parsed["result"]["instructions"].as_str().unwrap();
+        assert!(!instructions.contains("outdated"));
+    }
+
+    // --- version cache tests ---
+
+    #[test]
+    fn is_cache_stale_old_cache() {
+        let cache = VersionCache {
+            latest_version: "1.0.0".to_string(),
+            checked_at: "2020-01-01T00:00:00+00:00".to_string(),
+        };
+        assert!(is_cache_stale(&cache));
+    }
+
+    #[test]
+    fn is_cache_stale_fresh_cache() {
+        let cache = VersionCache {
+            latest_version: "1.0.0".to_string(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        };
+        assert!(!is_cache_stale(&cache));
+    }
+
+    #[test]
+    fn is_cache_stale_invalid_date() {
+        let cache = VersionCache {
+            latest_version: "1.0.0".to_string(),
+            checked_at: "not-a-date".to_string(),
+        };
+        assert!(is_cache_stale(&cache));
+    }
+
+    #[test]
+    fn is_cache_stale_future_timestamp() {
+        let cache = VersionCache {
+            latest_version: "1.0.0".to_string(),
+            checked_at: "2099-01-01T00:00:00+00:00".to_string(),
+        };
+        assert!(is_cache_stale(&cache));
+    }
+
+    #[test]
+    fn version_cache_roundtrip() {
+        let cache = VersionCache {
+            latest_version: "1.2.3".to_string(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let json_str = serde_json::to_string(&cache).unwrap();
+        let parsed: VersionCache = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.latest_version, "1.2.3");
     }
 
     // --- SSE parser tests ---
