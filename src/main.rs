@@ -50,6 +50,8 @@ enum Commands {
         /// Source folder containing the backup
         folder: String,
     },
+    /// Install Claude Code skills and hooks into the current project
+    SetupSkills,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -395,6 +397,175 @@ fn restore_credentials(folder: &str) -> Result<()> {
     Ok(())
 }
 
+// --- Embedded Claude Code skills and hooks ---
+
+static SKILLS: &[(&str, &str)] = &[
+    (
+        "check-inbox",
+        include_str!("../claude/skills/check-inbox/SKILL.md"),
+    ),
+    ("compose", include_str!("../claude/skills/compose/SKILL.md")),
+    (
+        "email-search",
+        include_str!("../claude/skills/email-search/SKILL.md"),
+    ),
+    (
+        "email-reply",
+        include_str!("../claude/skills/email-reply/SKILL.md"),
+    ),
+    (
+        "email-digest",
+        include_str!("../claude/skills/email-digest/SKILL.md"),
+    ),
+    (
+        "email-forward",
+        include_str!("../claude/skills/email-forward/SKILL.md"),
+    ),
+    (
+        "setup-inboxapi",
+        include_str!("../claude/skills/setup-inboxapi/SKILL.md"),
+    ),
+];
+
+static HOOKS: &[(&str, &str)] = &[
+    (
+        "email-send-guard.js",
+        include_str!("../claude/hooks/email-send-guard.js"),
+    ),
+    (
+        "email-activity-logger.js",
+        include_str!("../claude/hooks/email-activity-logger.js"),
+    ),
+    (
+        "credential-check.js",
+        include_str!("../claude/hooks/credential-check.js"),
+    ),
+];
+
+static HOOKS_SETTINGS: &str = r#"{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__inboxapi__send_email|mcp__inboxapi__send_reply|mcp__inboxapi__forward_email",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/email-send-guard.js",
+            "statusMessage": "Reviewing outbound email..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__inboxapi__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/email-activity-logger.js"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/credential-check.js",
+            "statusMessage": "Checking InboxAPI credentials..."
+          }
+        ]
+      }
+    ]
+  }
+}"#;
+
+fn setup_skills() -> Result<()> {
+    let base = PathBuf::from(".claude");
+
+    // Write skills
+    for (name, content) in SKILLS {
+        let dir = base.join("skills").join(name);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, content)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        println!("  Installed skill: /{}  ({})", name, path.display());
+    }
+
+    // Write hooks
+    let hooks_dir = base.join("hooks");
+    std::fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("Failed to create directory {}", hooks_dir.display()))?;
+    for (name, content) in HOOKS {
+        let path = hooks_dir.join(name);
+        std::fs::write(&path, content)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        println!("  Installed hook:  {}", path.display());
+    }
+
+    // Merge hook settings into .claude/settings.json
+    let settings_path = base.join("settings.json");
+    let merged = merge_hook_settings(&settings_path)?;
+    std::fs::write(&settings_path, merged)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+    println!("  Updated:         {}", settings_path.display());
+
+    println!();
+    println!("InboxAPI Claude Code skills and hooks installed successfully.");
+    println!("Available skills: /check-inbox, /compose, /email-search, /email-reply, /email-digest, /email-forward, /setup-inboxapi");
+    Ok(())
+}
+
+fn merge_hook_settings(settings_path: &PathBuf) -> Result<String> {
+    let new_settings: Value =
+        serde_json::from_str(HOOKS_SETTINGS).context("Failed to parse embedded hook settings")?;
+
+    let mut existing: Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+
+    // Merge hooks: for each event type, append our hook entries if not already present
+    if let Some(new_hooks) = new_settings.get("hooks").and_then(|h| h.as_object()) {
+        let existing_hooks = existing
+            .as_object_mut()
+            .unwrap()
+            .entry("hooks")
+            .or_insert_with(|| json!({}));
+        if let Some(existing_hooks_obj) = existing_hooks.as_object_mut() {
+            for (event, new_entries) in new_hooks {
+                let existing_entries = existing_hooks_obj.entry(event).or_insert_with(|| json!([]));
+                if let (Some(existing_arr), Some(new_arr)) =
+                    (existing_entries.as_array_mut(), new_entries.as_array())
+                {
+                    for new_entry in new_arr {
+                        // Check if an entry with the same matcher already exists
+                        let matcher = new_entry
+                            .get("matcher")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("");
+                        let already_exists = existing_arr.iter().any(|e| {
+                            e.get("matcher").and_then(|m| m.as_str()).unwrap_or("") == matcher
+                        });
+                        if !already_exists {
+                            existing_arr.push(new_entry.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    serde_json::to_string_pretty(&existing).context("Failed to serialize settings")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -414,6 +585,7 @@ async fn main() -> Result<()> {
         Some(Commands::Reset) => reset_credentials(),
         Some(Commands::Backup { folder }) => backup_credentials(&folder),
         Some(Commands::Restore { folder }) => restore_credentials(&folder),
+        Some(Commands::SetupSkills) => setup_skills(),
         None => {
             // Prefer the endpoint stored in credentials, if available; fall back to CLI default.
             let endpoint = match load_credentials() {

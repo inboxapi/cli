@@ -7,7 +7,8 @@
     "inboxapi": "index.js"
   },
   "files": [
-    "index.js"
+    "index.js",
+    "claude"
   ],
   "repository": {
     "type": "git",
