@@ -504,7 +504,7 @@ fn setup_skills(force: bool) -> Result<()> {
                 continue;
             }
             println!(
-                "  Skipped (local edits detected): /{}  ({})",
+                "  Skipped (file differs from bundled version): /{}  ({})",
                 name,
                 path.display()
             );
@@ -528,7 +528,10 @@ fn setup_skills(force: bool) -> Result<()> {
             if existing == *content {
                 println!("  Up to date:      {}", path.display());
             } else {
-                println!("  Skipped (local edits detected): {}", path.display());
+                println!(
+                    "  Skipped (file differs from bundled version): {}",
+                    path.display()
+                );
                 println!("    Use --force to overwrite");
             }
             continue;

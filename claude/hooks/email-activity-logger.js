@@ -27,7 +27,7 @@ function main() {
   const timestamp = new Date().toISOString();
   const shortName = toolName.replace("mcp__inboxapi__", "");
 
-  // Build a concise, privacy-preserving log entry (no PII in log output)
+  // Build a concise log entry (logs identifiers and lengths, not email content)
   let details = "";
   switch (shortName) {
     case "send_email": {
