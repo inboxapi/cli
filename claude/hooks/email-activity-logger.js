@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 
 function main() {
-  const input = fs.readFileSync("/dev/stdin", "utf8");
+  const input = fs.readFileSync(0, "utf8");
   let data;
   try {
     data = JSON.parse(input);
@@ -51,8 +51,11 @@ function main() {
     case "get_thread":
       details = `thread_id=${toolInput.thread_id || "?"}`;
       break;
-    default:
-      details = JSON.stringify(toolInput).substring(0, 200);
+    default: {
+      const keys = toolInput && typeof toolInput === "object" ? Object.keys(toolInput) : [];
+      details = keys.length ? `fields=${keys.join(",")}` : "fields=<none>";
+      break;
+    }
   }
 
   const logLine = `[${timestamp}] ${shortName}: ${details}\n`;

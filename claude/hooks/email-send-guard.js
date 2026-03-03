@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // InboxAPI Email Send Guard — PreToolUse hook
 // Reviews outbound emails before sending. Logs details to stderr for user visibility.
-// Exit 0 = allow, Exit 2 = block
+// Exit 0 = allow
 
 const fs = require("fs");
 
 function main() {
-  const input = fs.readFileSync("/dev/stdin", "utf8");
+  const input = fs.readFileSync(0, "utf8");
   let data;
   try {
     data = JSON.parse(input);

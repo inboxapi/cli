@@ -5,7 +5,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+
 
 function findCredentials() {
   const home = process.env.HOME || process.env.USERPROFILE || "";

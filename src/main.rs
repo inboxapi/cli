@@ -485,12 +485,26 @@ static HOOKS_SETTINGS: &str = r#"{
 fn setup_skills() -> Result<()> {
     let base = PathBuf::from(".claude");
 
-    // Write skills
+    // Write skills (skip if on-disk content already matches)
     for (name, content) in SKILLS {
         let dir = base.join("skills").join(name);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create directory {}", dir.display()))?;
         let path = dir.join("SKILL.md");
+        if path.exists() {
+            let existing = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read existing {}", path.display()))?;
+            if existing == *content {
+                println!("  Up to date:      /{}  ({})", name, path.display());
+                continue;
+            }
+            println!(
+                "  Skipped (local edits detected): /{}  ({})",
+                name,
+                path.display()
+            );
+            continue;
+        }
         std::fs::write(&path, content)
             .with_context(|| format!("Failed to write {}", path.display()))?;
         println!("  Installed skill: /{}  ({})", name, path.display());
@@ -527,12 +541,25 @@ fn merge_hook_settings(settings_path: &PathBuf) -> Result<String> {
     let mut existing: Value = if settings_path.exists() {
         let content = std::fs::read_to_string(settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
-        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+        serde_json::from_str(&content).with_context(|| {
+            format!(
+                "Failed to parse existing settings from {}",
+                settings_path.display()
+            )
+        })?
     } else {
         json!({})
     };
 
-    // Merge hooks: for each event type, append our hook entries if not already present
+    // Ensure root is an object
+    if !existing.is_object() {
+        anyhow::bail!(
+            "{} is not a JSON object — cannot merge hook settings",
+            settings_path.display()
+        );
+    }
+
+    // Merge hooks: for each event type, merge at the individual hook level
     if let Some(new_hooks) = new_settings.get("hooks").and_then(|h| h.as_object()) {
         let existing_hooks = existing
             .as_object_mut()
@@ -542,19 +569,54 @@ fn merge_hook_settings(settings_path: &PathBuf) -> Result<String> {
         if let Some(existing_hooks_obj) = existing_hooks.as_object_mut() {
             for (event, new_entries) in new_hooks {
                 let existing_entries = existing_hooks_obj.entry(event).or_insert_with(|| json!([]));
+                // Coerce non-array values into an array
+                if !existing_entries.is_array() {
+                    let previous_value = existing_entries.clone();
+                    *existing_entries = json!([previous_value]);
+                }
                 if let (Some(existing_arr), Some(new_arr)) =
                     (existing_entries.as_array_mut(), new_entries.as_array())
                 {
                     for new_entry in new_arr {
-                        // Check if an entry with the same matcher already exists
                         let matcher = new_entry
                             .get("matcher")
                             .and_then(|m| m.as_str())
                             .unwrap_or("");
-                        let already_exists = existing_arr.iter().any(|e| {
+
+                        // Find existing entry with the same matcher
+                        let existing_match = existing_arr.iter_mut().find(|e| {
                             e.get("matcher").and_then(|m| m.as_str()).unwrap_or("") == matcher
                         });
-                        if !already_exists {
+
+                        if let Some(existing_entry) = existing_match {
+                            // Merge hooks at the individual command level
+                            if let Some(new_hooks_arr) =
+                                new_entry.get("hooks").and_then(|h| h.as_array())
+                            {
+                                let entry_hooks = existing_entry
+                                    .as_object_mut()
+                                    .map(|obj| obj.entry("hooks").or_insert_with(|| json!([])));
+                                if let Some(entry_hooks_val) = entry_hooks {
+                                    if let Some(entry_hooks_arr) = entry_hooks_val.as_array_mut() {
+                                        for new_hook in new_hooks_arr {
+                                            let new_cmd = new_hook
+                                                .get("command")
+                                                .and_then(|c| c.as_str())
+                                                .unwrap_or("");
+                                            let hook_exists = entry_hooks_arr.iter().any(|h| {
+                                                h.get("command")
+                                                    .and_then(|c| c.as_str())
+                                                    .unwrap_or("")
+                                                    == new_cmd
+                                            });
+                                            if !hook_exists {
+                                                entry_hooks_arr.push(new_hook.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
                             existing_arr.push(new_entry.clone());
                         }
                     }
