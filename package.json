@@ -34,6 +34,6 @@
     "@inboxapi/cli-win32-x64": "0.1.0"
   },
   "dependencies": {
-    "@inboxapi/cli": "^0.2.15"
+    "@inboxapi/cli": "^0.2.17"
   }
 }
