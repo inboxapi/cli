@@ -19,6 +19,7 @@ Install the `@inboxapi/cli@latest` npm package globally and then register the `i
 - [Getting Started](#getting-started)
 - [Commands](#commands)
 - [Usage with MCP Clients](#usage-with-mcp-clients)
+- [Skills for Claude Code](#skills-for-claude-code)
 - [Development](#development)
 - [FAQ](#faq)
 - [License](#license)
@@ -147,6 +148,15 @@ Restores credentials from a backup folder. Validates backup integrity and offers
 inboxapi restore ./my-backup
 ```
 
+### `setup-skills`
+
+Installs Claude Code skills (slash commands) and hooks into the current project. Skills add email workflows like `/check-inbox`, `/compose`, and `/email-search` directly into Claude Code. Hooks provide automatic credential checks, email send guardrails, and activity logging.
+
+```bash
+inboxapi setup-skills
+inboxapi setup-skills --force  # Overwrite existing skills and hooks
+```
+
 ## Usage with MCP Clients
 
 InboxAPI CLI works as an MCP STDIO transport. Point your MCP client at the `inboxapi` binary:
@@ -210,6 +220,36 @@ When prompted, enter:
 ```bash
 codex mcp add inboxapi inboxapi
 ```
+
+## Skills for Claude Code
+
+InboxAPI includes a set of skills — Claude Code slash commands — that add guided email workflows to your project. Install them with:
+
+```bash
+inboxapi setup-skills
+```
+
+### Available Skills
+
+| Skill | Description |
+|-------|-------------|
+| `/check-inbox` | Fetch and display a summary of recent emails in a formatted table |
+| `/compose` | Compose and send an email with guided prompts, addressbook lookup, and confirmation |
+| `/email-search` | Search emails using natural language queries |
+| `/email-reply` | Reply to an email with full thread context and preview before sending |
+| `/email-digest` | Generate a structured digest of recent email activity grouped by threads |
+| `/email-forward` | Forward an email to another recipient with an optional note |
+| `/setup-inboxapi` | Configure InboxAPI MCP server and install skills into a Claude Code project |
+
+### Hooks
+
+The `setup-skills` command also installs three hooks that run automatically:
+
+| Hook | Type | Description |
+|------|------|-------------|
+| Credential Check | SessionStart | Verifies InboxAPI credentials on startup and shows authentication status |
+| Email Send Guard | PreToolUse | Reviews outbound emails before sending, warns about self-sends and empty bodies |
+| Activity Logger | PostToolUse | Logs all InboxAPI tool usage to `.claude/inboxapi-activity.log` for audit trails |
 
 ## Development
 
