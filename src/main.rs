@@ -884,6 +884,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 Ok(resp) => {
                     let status = resp.status();
                     if status == reqwest::StatusCode::ACCEPTED {
+                        if let Some(id) = msg.get("id").cloned() {
+                            write_jsonrpc_error(
+                                &mut out,
+                                id,
+                                -32603,
+                                "Server returned 202 Accepted instead of a JSON-RPC response",
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                     if !status.is_success() {
@@ -892,6 +901,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                             .await
                             .unwrap_or_else(|_| "Unknown error".to_string());
                         eprintln!("POST failed ({}): {}", status, err_text);
+                        if let Some(id) = msg.get("id").cloned() {
+                            write_jsonrpc_error(
+                                &mut out,
+                                id,
+                                -32603,
+                                &format!("Upstream HTTP error {}", status.as_u16()),
+                            )
+                            .await?;
+                        }
                         continue;
                     }
 
@@ -899,6 +917,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("Parse error: {}", e);
+                            if let Some(id) = msg.get("id").cloned() {
+                                write_jsonrpc_error(
+                                    &mut out,
+                                    id,
+                                    -32603,
+                                    &format!("Failed to parse upstream response: {}", e),
+                                )
+                                .await?;
+                            }
                             continue;
                         }
                     };
@@ -979,6 +1006,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("POST Error: {}", e);
+                    if let Some(id) = msg.get("id").cloned() {
+                        write_jsonrpc_error(
+                            &mut out,
+                            id,
+                            -32603,
+                            &format!("Connection error: {}", e),
+                        )
+                        .await?;
+                    }
                 }
             }
         } else {
@@ -995,6 +1031,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 Ok(resp) => {
                     let status = resp.status();
                     if status == reqwest::StatusCode::ACCEPTED {
+                        if let Some(id) = msg.get("id").cloned() {
+                            write_jsonrpc_error(
+                                &mut out,
+                                id,
+                                -32603,
+                                "Server returned 202 Accepted instead of a JSON-RPC response",
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                     if !status.is_success() {
@@ -1003,6 +1048,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                             .await
                             .unwrap_or_else(|_| "Unknown error".to_string());
                         eprintln!("POST failed ({}): {}", status, err_text);
+                        if let Some(id) = msg.get("id").cloned() {
+                            write_jsonrpc_error(
+                                &mut out,
+                                id,
+                                -32603,
+                                &format!("Upstream HTTP error {}", status.as_u16()),
+                            )
+                            .await?;
+                        }
                         continue;
                     }
 
@@ -1083,6 +1137,15 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("POST Error: {}", e);
+                    if let Some(id) = msg.get("id").cloned() {
+                        write_jsonrpc_error(
+                            &mut out,
+                            id,
+                            -32603,
+                            &format!("Connection error: {}", e),
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -1687,6 +1750,30 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
         }
     }
     body.to_string()
+}
+
+fn build_jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    })
+}
+
+async fn write_jsonrpc_error(
+    out: &mut (impl tokio::io::AsyncWrite + Unpin),
+    id: Value,
+    code: i64,
+    message: &str,
+) -> Result<()> {
+    let err_resp = build_jsonrpc_error(id, code, message);
+    let body = serde_json::to_string(&err_resp)?;
+    out.write_all(format!("{}\n", body).as_bytes()).await?;
+    out.flush().await?;
+    Ok(())
 }
 
 fn inject_token(msg: &mut Value, token: &str) {
@@ -3388,5 +3475,497 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert!(parsed["hooks"]["PreToolUse"].is_array());
+    }
+
+    // --- build_jsonrpc_error tests ---
+
+    #[test]
+    fn test_build_jsonrpc_error_structure() {
+        let err = build_jsonrpc_error(json!(1), -32603, "Something went wrong");
+        assert_eq!(err["jsonrpc"], "2.0");
+        assert_eq!(err["id"], 1);
+        assert_eq!(err["error"]["code"], -32603);
+        assert_eq!(err["error"]["message"], "Something went wrong");
+    }
+
+    #[test]
+    fn test_build_jsonrpc_error_preserves_string_id() {
+        let err = build_jsonrpc_error(json!("req-abc"), -32603, "fail");
+        assert_eq!(err["id"], "req-abc");
+    }
+
+    #[test]
+    fn test_build_jsonrpc_error_preserves_null_id() {
+        let err = build_jsonrpc_error(Value::Null, -32603, "fail");
+        assert!(err["id"].is_null());
+    }
+
+    // --- inject_token tests for all tools ---
+
+    #[test]
+    fn test_inject_token_send_reply() {
+        let mut msg = make_tools_call(
+            "send_reply",
+            json!({"in_reply_to": "<msg@test>", "body": "Thanks"}),
+        );
+        inject_token(&mut msg, "tok-123");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args["token"], "tok-123");
+        assert_eq!(args["in_reply_to"], "<msg@test>");
+        assert_eq!(args["body"], "Thanks");
+    }
+
+    #[test]
+    fn test_inject_token_send_email() {
+        let mut msg = make_tools_call(
+            "send_email",
+            json!({"to": ["a@b.com"], "subject": "Hi", "body": "Hello"}),
+        );
+        inject_token(&mut msg, "tok-456");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args["token"], "tok-456");
+        assert_eq!(args["subject"], "Hi");
+    }
+
+    #[test]
+    fn test_inject_token_forward_email() {
+        let mut msg = make_tools_call(
+            "forward_email",
+            json!({"message_id": "<fwd@test>", "to": ["c@d.com"]}),
+        );
+        inject_token(&mut msg, "tok-789");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args["token"], "tok-789");
+        assert_eq!(args["message_id"], "<fwd@test>");
+    }
+
+    #[test]
+    fn test_inject_token_get_emails() {
+        let mut msg = make_tools_call("get_emails", json!({"limit": 20}));
+        inject_token(&mut msg, "tok-ge");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-ge");
+    }
+
+    #[test]
+    fn test_inject_token_get_email() {
+        let mut msg = make_tools_call("get_email", json!({"index": 0}));
+        inject_token(&mut msg, "tok-ge1");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-ge1");
+    }
+
+    #[test]
+    fn test_inject_token_get_last_email() {
+        let mut msg = make_tools_call("get_last_email", json!({}));
+        inject_token(&mut msg, "tok-gle");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-gle");
+    }
+
+    #[test]
+    fn test_inject_token_get_email_count() {
+        let mut msg = make_tools_call("get_email_count", json!({}));
+        inject_token(&mut msg, "tok-gec");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-gec");
+    }
+
+    #[test]
+    fn test_inject_token_search_emails() {
+        let mut msg = make_tools_call("search_emails", json!({"sender": "alice"}));
+        inject_token(&mut msg, "tok-se");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-se");
+        assert_eq!(msg["params"]["arguments"]["sender"], "alice");
+    }
+
+    #[test]
+    fn test_inject_token_get_thread() {
+        let mut msg = make_tools_call("get_thread", json!({"message_id": "<t@x>"}));
+        inject_token(&mut msg, "tok-gt");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-gt");
+        assert_eq!(msg["params"]["arguments"]["message_id"], "<t@x>");
+    }
+
+    #[test]
+    fn test_inject_token_get_sent_emails() {
+        let mut msg = make_tools_call("get_sent_emails", json!({}));
+        inject_token(&mut msg, "tok-gse");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-gse");
+    }
+
+    #[test]
+    fn test_inject_token_get_addressbook() {
+        let mut msg = make_tools_call("get_addressbook", json!({}));
+        inject_token(&mut msg, "tok-gab");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-gab");
+    }
+
+    #[test]
+    fn test_inject_token_get_announcements() {
+        let mut msg = make_tools_call("get_announcements", json!({}));
+        inject_token(&mut msg, "tok-ga");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-ga");
+    }
+
+    // --- mutate_feedback_tool does not affect other tools ---
+
+    #[test]
+    fn test_mutate_does_not_affect_send_reply() {
+        let mut msg = make_tools_call("send_reply", json!({"in_reply_to": "<x@y>", "body": "ok"}));
+        let original = msg.clone();
+        let result = mutate_feedback_tool(&mut msg, None);
+        assert!(!result);
+        assert_eq!(msg, original);
+    }
+
+    #[test]
+    fn test_mutate_does_not_affect_send_email() {
+        let mut msg = make_tools_call(
+            "send_email",
+            json!({"to": ["a@b.com"], "subject": "Hi", "body": "Hello"}),
+        );
+        let original = msg.clone();
+        let result = mutate_feedback_tool(&mut msg, None);
+        assert!(!result);
+        assert_eq!(msg, original);
+    }
+
+    #[test]
+    fn test_mutate_does_not_affect_forward_email() {
+        let mut msg = make_tools_call(
+            "forward_email",
+            json!({"message_id": "<m@x>", "to": ["a@b.com"]}),
+        );
+        let original = msg.clone();
+        let result = mutate_feedback_tool(&mut msg, None);
+        assert!(!result);
+        assert_eq!(msg, original);
+    }
+
+    #[test]
+    fn test_mutate_does_not_affect_get_emails() {
+        let mut msg = make_tools_call("get_emails", json!({"limit": 10}));
+        let original = msg.clone();
+        let result = mutate_feedback_tool(&mut msg, None);
+        assert!(!result);
+        assert_eq!(msg, original);
+    }
+
+    #[test]
+    fn test_mutate_does_not_affect_get_thread() {
+        let mut msg = make_tools_call("get_thread", json!({"message_id": "<t@x>"}));
+        let original = msg.clone();
+        let result = mutate_feedback_tool(&mut msg, None);
+        assert!(!result);
+        assert_eq!(msg, original);
+    }
+
+    // --- rewrite_tools_list token stripping ---
+
+    fn make_tools_list_body(tools: Vec<Value>) -> String {
+        serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": tools
+            }
+        }))
+        .unwrap()
+    }
+
+    fn make_tool_with_token(name: &str) -> Value {
+        json!({
+            "name": name,
+            "description": format!("The {} tool", name),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["token"]
+            }
+        })
+    }
+
+    #[test]
+    fn test_rewrite_strips_token_from_all_tool_schemas() {
+        let tools = vec![
+            make_tool_with_token("get_emails"),
+            make_tool_with_token("send_email"),
+            make_tool_with_token("send_reply"),
+        ];
+        let body = make_tools_list_body(tools);
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let result_tools = parsed["result"]["tools"].as_array().unwrap();
+        for tool in result_tools {
+            // Skip locally-injected tools (whoami, report_bug, request_feature)
+            let name = tool["name"].as_str().unwrap();
+            if name == "whoami" || name == "report_bug" || name == "request_feature" {
+                continue;
+            }
+            let props = &tool["inputSchema"]["properties"];
+            assert!(
+                props.get("token").is_none(),
+                "token should be stripped from {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_strips_token_from_required_array() {
+        let tools = vec![make_tool_with_token("get_emails")];
+        let body = make_tools_list_body(tools);
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let result_tools = parsed["result"]["tools"].as_array().unwrap();
+        // Find get_emails (first tool)
+        let tool = &result_tools[0];
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        assert!(
+            !required.iter().any(|v| v.as_str() == Some("token")),
+            "token should be removed from required"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_preserves_non_token_properties() {
+        let tools = vec![make_tool_with_token("get_emails")];
+        let body = make_tools_list_body(tools);
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let tool = &parsed["result"]["tools"][0];
+        assert!(tool["inputSchema"]["properties"]["limit"].is_object());
+    }
+
+    // --- identity injection on IDENTITY_TOOLS ---
+
+    fn make_creds_with_email() -> Credentials {
+        Credentials {
+            account_name: "test-agent".to_string(),
+            access_token: "at".to_string(),
+            refresh_token: "rt".to_string(),
+            endpoint: "https://example.com".to_string(),
+            email: Some("test-agent@test.inboxapi.ai".to_string()),
+        }
+    }
+
+    fn find_tool_description(result_body: &str, tool_name: &str) -> Option<String> {
+        let parsed: Value = serde_json::from_str(result_body).ok()?;
+        let tools = parsed["result"]["tools"].as_array()?;
+        tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(tool_name))
+            .and_then(|t| t["description"].as_str().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn test_identity_injected_into_send_email_description() {
+        let tools = vec![make_tool_with_token("send_email")];
+        let body = make_tools_list_body(tools);
+        let creds = make_creds_with_email();
+        let result = rewrite_tools_list(&body, Some(&creds));
+        let desc = find_tool_description(&result, "send_email").unwrap();
+        assert!(desc.contains("test-agent"));
+        assert!(desc.contains("test-agent@test.inboxapi.ai"));
+    }
+
+    #[test]
+    fn test_identity_injected_into_send_reply_description() {
+        let tools = vec![make_tool_with_token("send_reply")];
+        let body = make_tools_list_body(tools);
+        let creds = make_creds_with_email();
+        let result = rewrite_tools_list(&body, Some(&creds));
+        let desc = find_tool_description(&result, "send_reply").unwrap();
+        assert!(desc.contains("test-agent"));
+        assert!(desc.contains("test-agent@test.inboxapi.ai"));
+    }
+
+    #[test]
+    fn test_identity_injected_into_forward_email_description() {
+        let tools = vec![make_tool_with_token("forward_email")];
+        let body = make_tools_list_body(tools);
+        let creds = make_creds_with_email();
+        let result = rewrite_tools_list(&body, Some(&creds));
+        let desc = find_tool_description(&result, "forward_email").unwrap();
+        assert!(desc.contains("test-agent"));
+    }
+
+    #[test]
+    fn test_identity_not_injected_into_get_emails_description() {
+        let tools = vec![make_tool_with_token("get_emails")];
+        let body = make_tools_list_body(tools);
+        let creds = make_creds_with_email();
+        let result = rewrite_tools_list(&body, Some(&creds));
+        let desc = find_tool_description(&result, "get_emails").unwrap();
+        assert!(!desc.contains("test-agent@test.inboxapi.ai"));
+    }
+
+    #[test]
+    fn test_identity_not_injected_into_search_emails_description() {
+        let tools = vec![make_tool_with_token("search_emails")];
+        let body = make_tools_list_body(tools);
+        let creds = make_creds_with_email();
+        let result = rewrite_tools_list(&body, Some(&creds));
+        let desc = find_tool_description(&result, "search_emails").unwrap();
+        assert!(!desc.contains("test-agent@test.inboxapi.ai"));
+    }
+
+    // --- argument passthrough integrity ---
+
+    #[test]
+    fn test_send_reply_args_preserved() {
+        let mut msg = make_tools_call(
+            "send_reply",
+            json!({
+                "in_reply_to": "<msg@test>",
+                "body": "Thanks",
+                "reply_all": true,
+                "cc": ["cc@test.com"],
+                "bcc": ["bcc@test.com"],
+                "from_name": "agent",
+                "html_body": "<p>Thanks</p>",
+                "priority": "high"
+            }),
+        );
+        inject_token(&mut msg, "tok");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args["in_reply_to"], "<msg@test>");
+        assert_eq!(args["body"], "Thanks");
+        assert_eq!(args["reply_all"], true);
+        assert_eq!(args["cc"], json!(["cc@test.com"]));
+        assert_eq!(args["bcc"], json!(["bcc@test.com"]));
+        assert_eq!(args["from_name"], "agent");
+        assert_eq!(args["html_body"], "<p>Thanks</p>");
+        assert_eq!(args["priority"], "high");
+        assert_eq!(args["token"], "tok");
+    }
+
+    #[test]
+    fn test_send_email_args_preserved() {
+        let mut msg = make_tools_call(
+            "send_email",
+            json!({
+                "to": ["a@b.com"],
+                "subject": "Hi",
+                "body": "Hello",
+                "cc": ["cc@b.com"],
+                "bcc": ["bcc@b.com"],
+                "from_name": "sender",
+                "html_body": "<p>Hello</p>",
+                "priority": "low",
+                "domain": "custom.com"
+            }),
+        );
+        inject_token(&mut msg, "tok");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args["to"], json!(["a@b.com"]));
+        assert_eq!(args["subject"], "Hi");
+        assert_eq!(args["body"], "Hello");
+        assert_eq!(args["cc"], json!(["cc@b.com"]));
+        assert_eq!(args["bcc"], json!(["bcc@b.com"]));
+        assert_eq!(args["from_name"], "sender");
+        assert_eq!(args["html_body"], "<p>Hello</p>");
+        assert_eq!(args["priority"], "low");
+        assert_eq!(args["domain"], "custom.com");
+        assert_eq!(args["token"], "tok");
+    }
+
+    #[test]
+    fn test_forward_email_args_preserved() {
+        let mut msg = make_tools_call(
+            "forward_email",
+            json!({
+                "message_id": "<fwd@test>",
+                "to": ["x@y.com"],
+                "cc": ["cc@y.com"],
+                "from_name": "fwder",
+                "note": "FYI",
+                "domain": "custom.com"
+            }),
+        );
+        inject_token(&mut msg, "tok");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args["message_id"], "<fwd@test>");
+        assert_eq!(args["to"], json!(["x@y.com"]));
+        assert_eq!(args["cc"], json!(["cc@y.com"]));
+        assert_eq!(args["from_name"], "fwder");
+        assert_eq!(args["note"], "FYI");
+        assert_eq!(args["domain"], "custom.com");
+        assert_eq!(args["token"], "tok");
+    }
+
+    // --- edge cases ---
+
+    #[test]
+    fn test_inject_token_empty_arguments_object() {
+        let mut msg = make_tools_call("get_emails", json!({}));
+        inject_token(&mut msg, "tok-empty");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-empty");
+    }
+
+    #[test]
+    fn test_inject_token_missing_arguments_key() {
+        let mut msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_emails"
+            }
+        });
+        inject_token(&mut msg, "tok-missing");
+        assert_eq!(msg["params"]["arguments"]["token"], "tok-missing");
+    }
+
+    #[test]
+    fn test_inject_token_null_arguments() {
+        let mut msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_emails",
+                "arguments": null
+            }
+        });
+        inject_token(&mut msg, "tok-null");
+        // null arguments can't be coerced into an object, so token is not injected
+        assert!(msg["params"]["arguments"].is_null());
+        assert!(msg["params"]["arguments"].get("token").is_none());
+    }
+
+    #[test]
+    fn test_send_reply_with_all_optional_fields() {
+        let mut msg = make_tools_call(
+            "send_reply",
+            json!({
+                "in_reply_to": "<msg@test>",
+                "body": "reply body",
+                "reply_all": true,
+                "cc": ["cc@test.com"],
+                "bcc": ["bcc@test.com"],
+                "from_name": "custom-name",
+                "html_body": "<p>reply</p>",
+                "priority": "high"
+            }),
+        );
+        inject_token(&mut msg, "tok");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args.len(), 9); // 8 fields + token
+        assert_eq!(args["token"], "tok");
+    }
+
+    #[test]
+    fn test_send_reply_with_only_required_fields() {
+        let mut msg = make_tools_call(
+            "send_reply",
+            json!({"in_reply_to": "<msg@test>", "body": "reply"}),
+        );
+        inject_token(&mut msg, "tok");
+        let args = msg["params"]["arguments"].as_object().unwrap();
+        assert_eq!(args.len(), 3); // in_reply_to + body + token
+        assert_eq!(args["in_reply_to"], "<msg@test>");
+        assert_eq!(args["body"], "reply");
+        assert_eq!(args["token"], "tok");
     }
 }
