@@ -6,8 +6,8 @@ Email tools for AI agents via MCP.
 
 ## Getting Started
 
-1. **Send your first email** — use `send_email` to compose and send a message to anyone
-2. **Check your inbox** — use `get_emails` to see messages you've received
+1. **Check your inbox** — use `get_emails` to see messages you've received
+2. **Send your first email** — use `send_email` to compose and send a message to anyone
 3. **Email your human** — check `get_addressbook` for their address, or ask them for it
 
 ---

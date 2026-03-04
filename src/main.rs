@@ -542,6 +542,7 @@ async fn run_proxy(endpoint: String) -> Result<()> {
         tokio::spawn(version_check_loop(client, current, version_tx));
     }
     let mut last_notified_version: Option<String> = None;
+    let mut empty_inbox_nudge_sent = false;
 
     // Handle stdin -> POST, read responses as Streamable HTTP (JSON or SSE)
     let mut out = stdout();
@@ -587,19 +588,18 @@ async fn run_proxy(endpoint: String) -> Result<()> {
             .unwrap_or("")
             .to_string();
 
-        let tool_name = msg
-            .get("params")
-            .and_then(|p| p.get("name"))
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string();
-
         // Inject token if needed
         if let Some(creds) = &creds {
             inject_token(&mut msg, &creds.access_token);
         }
 
         if method == "tools/call" {
+            let tool_name = msg
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
             // Buffer full response for tools/call to enable token refresh retry
             let res = http_client
                 .post(&endpoint)
@@ -693,9 +693,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         }
                     }
 
-                    // Nudge agent to send email when inbox is empty
-                    if tool_name == "get_emails" && is_empty_inbox_response(&final_response) {
+                    // Nudge agent to send email when inbox is empty (once per session)
+                    if !empty_inbox_nudge_sent
+                        && tool_name == "get_emails"
+                        && is_empty_inbox_response(&final_response)
+                    {
                         inject_empty_inbox_nudge(&mut final_response);
+                        empty_inbox_nudge_sent = true;
                     }
 
                     let body = serde_json::to_string(&final_response)?;
@@ -1037,9 +1041,8 @@ Call the whoami tool to get the agent's own account name and InboxAPI email addr
 IMPORTANT: The agent's InboxAPI email is the agent's inbox, not the human user's. \
 When asked to send email to the human user, first call get_addressbook to check if you already have their email address. Only ask if it's not in the addressbook. Once you learn their email, save it to your persistent memory for future sessions. \
 Call the help tool for a list of available tools. \
-You have a fully functional email account. Proactively offer to send emails when relevant — for example, \
-sending summaries, sharing results, drafting messages, or following up on tasks. When the conversation starts, \
-let the human know you have your own email address and can send and receive emails.";
+You have a fully functional email account. When relevant, offer to send emails — for example, \
+sending summaries, sharing results, drafting messages, or following up on tasks.";
 
 fn is_help_call(msg: &Value) -> bool {
     msg.get("method")
@@ -1223,25 +1226,30 @@ fn inject_initialize_instructions(
 }
 
 fn is_empty_inbox_response(response: &Value) -> bool {
-    response
+    let text = response
         .get("result")
         .and_then(|r| r.get("content"))
         .and_then(|c| c.as_array())
-        .map(|content| {
-            content.iter().all(|item| {
-                item.get("text")
-                    .and_then(|t| t.as_str())
-                    .map(|text| {
-                        let trimmed = text.trim();
-                        trimmed.is_empty()
-                            || trimmed == "[]"
-                            || trimmed == "No emails found."
-                            || trimmed == "No emails found"
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+        .and_then(|content| content.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Check for empty JSON array (handles "[]", "[ ]", pretty-printed, etc.)
+    if let Ok(arr) = serde_json::from_str::<Vec<Value>>(trimmed) {
+        if arr.is_empty() {
+            return true;
+        }
+    }
+
+    // Case-insensitive check for "no emails" messages
+    let lower = trimmed.to_lowercase();
+    lower.contains("no emails")
 }
 
 fn inject_empty_inbox_nudge(response: &mut Value) {
@@ -2967,8 +2975,68 @@ mod tests {
     }
 
     #[test]
-    fn initialize_instructions_include_proactive_cta() {
-        assert!(INITIALIZE_INSTRUCTIONS.contains("Proactively offer to send emails"));
-        assert!(INITIALIZE_INSTRUCTIONS.contains("let the human know"));
+    fn initialize_instructions_include_email_cta() {
+        assert!(INITIALIZE_INSTRUCTIONS.contains("offer to send emails"));
+    }
+
+    #[test]
+    fn is_empty_inbox_response_handles_error_response() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32000, "message": "Internal error"}
+        });
+        assert!(!is_empty_inbox_response(&response));
+    }
+
+    #[test]
+    fn is_empty_inbox_response_handles_missing_content() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {}
+        });
+        assert!(!is_empty_inbox_response(&response));
+    }
+
+    #[test]
+    fn is_empty_inbox_response_case_insensitive() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "No Emails Found."}]
+            }
+        });
+        assert!(is_empty_inbox_response(&response));
+    }
+
+    #[test]
+    fn is_empty_inbox_response_with_extra_content_items() {
+        // When proxy appends additional content (e.g., update notice),
+        // detection should still work based on first item only.
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {"type": "text", "text": "[]"},
+                    {"type": "text", "text": "Some proxy-added notice"}
+                ]
+            }
+        });
+        assert!(is_empty_inbox_response(&response));
+    }
+
+    #[test]
+    fn inject_empty_inbox_nudge_noop_without_content() {
+        let mut response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {}
+        });
+        inject_empty_inbox_nudge(&mut response);
+        // Should not crash; no content array to append to
+        assert!(response["result"]["content"].is_null());
     }
 }
