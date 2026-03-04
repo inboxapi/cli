@@ -863,17 +863,7 @@ async fn run_proxy(endpoint: String) -> Result<()> {
         // Capture AI client identification from initialize request
         if method == "initialize" {
             if let Some(info) = msg.get("params").and_then(|p| p.get("clientInfo")) {
-                let name = info
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("unknown");
-                let version = info.get("version").and_then(|v| v.as_str()).unwrap_or("0");
-                client_ua = Some(format!(
-                    "inboxapi-cli/{} ({}/{})",
-                    env!("CARGO_PKG_VERSION"),
-                    name,
-                    version
-                ));
+                client_ua = Some(build_client_user_agent(info));
             }
         }
 
@@ -1398,6 +1388,36 @@ When asked to send email to the human user, first call get_addressbook to check 
 Call the help tool for a list of available tools. \
 You have a fully functional email account. When relevant, offer to send emails — for example, \
 sending summaries, sharing results, drafting messages, or following up on tasks.";
+
+/// Build a User-Agent string from MCP `clientInfo`.
+///
+/// Sanitizes name/version to printable ASCII and truncates to prevent
+/// oversized headers. Produces strings like:
+///   `inboxapi-cli/0.2.21 (claude-code/1.0.82)`
+fn build_client_user_agent(info: &Value) -> String {
+    fn sanitize(s: &str, max_len: usize) -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_graphic())
+            .take(max_len)
+            .collect()
+    }
+    let name = sanitize(
+        info.get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown"),
+        64,
+    );
+    let version = sanitize(
+        info.get("version").and_then(|v| v.as_str()).unwrap_or("0"),
+        32,
+    );
+    format!(
+        "inboxapi-cli/{} ({}/{})",
+        env!("CARGO_PKG_VERSION"),
+        name,
+        version
+    )
+}
 
 fn is_help_call(msg: &Value) -> bool {
     msg.get("method")
@@ -4033,5 +4053,41 @@ mod tests {
         });
         strip_domain(&mut msg);
         assert_eq!(msg["params"]["arguments"]["domain"], "inboxapi.io");
+    }
+
+    // --- build_client_user_agent tests ---
+
+    #[test]
+    fn test_build_client_user_agent_normal() {
+        let info = json!({"name": "claude-code", "version": "1.0.82"});
+        let ua = build_client_user_agent(&info);
+        assert!(ua.starts_with("inboxapi-cli/"));
+        assert!(ua.contains("(claude-code/1.0.82)"));
+    }
+
+    #[test]
+    fn test_build_client_user_agent_missing_fields() {
+        let info = json!({});
+        let ua = build_client_user_agent(&info);
+        assert!(ua.contains("(unknown/0)"));
+    }
+
+    #[test]
+    fn test_build_client_user_agent_sanitizes_non_ascii() {
+        let info = json!({"name": "bad\x00name with spaces", "version": "1.0"});
+        let ua = build_client_user_agent(&info);
+        // Control chars and spaces stripped from name/version (only ascii graphic kept)
+        assert!(!ua.contains('\x00'));
+        // The name part should have no spaces (sanitized to "badnamewithspaces")
+        assert!(ua.contains("badnamewithspaces"));
+    }
+
+    #[test]
+    fn test_build_client_user_agent_truncates_long_values() {
+        let long_name = "a".repeat(200);
+        let info = json!({"name": long_name, "version": "1.0"});
+        let ua = build_client_user_agent(&info);
+        // Name truncated to 64 chars
+        assert!(ua.len() < 150);
     }
 }
