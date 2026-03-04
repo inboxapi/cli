@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use reqwest::{
-    header::{ACCEPT, CONTENT_TYPE},
+    header::{ACCEPT, CONTENT_TYPE, USER_AGENT},
     Client as HttpClient,
 };
 use serde::{Deserialize, Serialize};
@@ -818,6 +818,7 @@ async fn run_proxy(endpoint: String) -> Result<()> {
     // Handle stdin -> POST, read responses as Streamable HTTP (JSON or SSE)
     let mut out = stdout();
     let mut lines = BufReader::new(stdin()).lines();
+    let mut client_ua: Option<String> = None;
     while let Some(line) = lines.next_line().await? {
         let mut msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
@@ -859,6 +860,23 @@ async fn run_proxy(endpoint: String) -> Result<()> {
             .unwrap_or("")
             .to_string();
 
+        // Capture AI client identification from initialize request
+        if method == "initialize" {
+            if let Some(info) = msg.get("params").and_then(|p| p.get("clientInfo")) {
+                let name = info
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
+                let version = info.get("version").and_then(|v| v.as_str()).unwrap_or("0");
+                client_ua = Some(format!(
+                    "inboxapi-cli/{} ({}/{})",
+                    env!("CARGO_PKG_VERSION"),
+                    name,
+                    version
+                ));
+            }
+        }
+
         // Inject token if needed
         if let Some(creds) = &creds {
             inject_token(&mut msg, &creds.access_token);
@@ -873,13 +891,14 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 .unwrap_or("")
                 .to_string();
             // Buffer full response for tools/call to enable token refresh retry
-            let res = http_client
+            let mut req = http_client
                 .post(&endpoint)
                 .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "application/json, text/event-stream")
-                .json(&msg)
-                .send()
-                .await;
+                .header(ACCEPT, "application/json, text/event-stream");
+            if let Some(ref ua) = client_ua {
+                req = req.header(USER_AGENT, ua.as_str());
+            }
+            let res = req.json(&msg).send().await;
 
             match res {
                 Ok(resp) => {
@@ -952,14 +971,14 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                                     creds = Some(new_creds);
 
                                     // Retry the request once
-                                    match http_client
+                                    let mut retry_req = http_client
                                         .post(&endpoint)
                                         .header(CONTENT_TYPE, "application/json")
-                                        .header(ACCEPT, "application/json, text/event-stream")
-                                        .json(&msg)
-                                        .send()
-                                        .await
-                                    {
+                                        .header(ACCEPT, "application/json, text/event-stream");
+                                    if let Some(ref ua) = client_ua {
+                                        retry_req = retry_req.header(USER_AGENT, ua.as_str());
+                                    }
+                                    match retry_req.json(&msg).send().await {
                                         Ok(retry_resp) if retry_resp.status().is_success() => {
                                             parse_response(retry_resp).await.unwrap_or(response)
                                         }
@@ -1020,13 +1039,14 @@ async fn run_proxy(endpoint: String) -> Result<()> {
             }
         } else {
             // Non-tools/call: stream response directly
-            let res = http_client
+            let mut req = http_client
                 .post(&endpoint)
                 .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "application/json, text/event-stream")
-                .json(&msg)
-                .send()
-                .await;
+                .header(ACCEPT, "application/json, text/event-stream");
+            if let Some(ref ua) = client_ua {
+                req = req.header(USER_AGENT, ua.as_str());
+            }
+            let res = req.json(&msg).send().await;
 
             match res {
                 Ok(resp) => {
