@@ -885,14 +885,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                     let status = resp.status();
                     if status == reqwest::StatusCode::ACCEPTED {
                         if let Some(id) = msg.get("id").cloned() {
-                            let err_resp = build_jsonrpc_error(
+                            write_jsonrpc_error(
+                                &mut out,
                                 id,
                                 -32603,
                                 "Server returned 202 Accepted with no response body",
-                            );
-                            let body = serde_json::to_string(&err_resp)?;
-                            out.write_all(format!("{}\n", body).as_bytes()).await?;
-                            out.flush().await?;
+                            )
+                            .await?;
                         }
                         continue;
                     }
@@ -904,14 +903,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         eprintln!("POST failed ({}): {}", status, err_text);
                         if let Some(id) = msg.get("id").cloned() {
                             let safe_text = truncate_error_text(&err_text);
-                            let err_resp = build_jsonrpc_error(
+                            write_jsonrpc_error(
+                                &mut out,
                                 id,
                                 -32603,
                                 &format!("Upstream HTTP error {}: {}", status.as_u16(), safe_text),
-                            );
-                            let body = serde_json::to_string(&err_resp)?;
-                            out.write_all(format!("{}\n", body).as_bytes()).await?;
-                            out.flush().await?;
+                            )
+                            .await?;
                         }
                         continue;
                     }
@@ -921,14 +919,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         Err(e) => {
                             eprintln!("Parse error: {}", e);
                             if let Some(id) = msg.get("id").cloned() {
-                                let err_resp = build_jsonrpc_error(
+                                write_jsonrpc_error(
+                                    &mut out,
                                     id,
                                     -32603,
                                     &format!("Failed to parse upstream response: {}", e),
-                                );
-                                let body = serde_json::to_string(&err_resp)?;
-                                out.write_all(format!("{}\n", body).as_bytes()).await?;
-                                out.flush().await?;
+                                )
+                                .await?;
                             }
                             continue;
                         }
@@ -1011,11 +1008,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 Err(e) => {
                     eprintln!("POST Error: {}", e);
                     if let Some(id) = msg.get("id").cloned() {
-                        let err_resp =
-                            build_jsonrpc_error(id, -32603, &format!("Connection error: {}", e));
-                        let body = serde_json::to_string(&err_resp)?;
-                        out.write_all(format!("{}\n", body).as_bytes()).await?;
-                        out.flush().await?;
+                        write_jsonrpc_error(
+                            &mut out,
+                            id,
+                            -32603,
+                            &format!("Connection error: {}", e),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1034,14 +1033,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                     let status = resp.status();
                     if status == reqwest::StatusCode::ACCEPTED {
                         if let Some(id) = msg.get("id").cloned() {
-                            let err_resp = build_jsonrpc_error(
+                            write_jsonrpc_error(
+                                &mut out,
                                 id,
                                 -32603,
                                 "Server returned 202 Accepted with no response body",
-                            );
-                            let body = serde_json::to_string(&err_resp)?;
-                            out.write_all(format!("{}\n", body).as_bytes()).await?;
-                            out.flush().await?;
+                            )
+                            .await?;
                         }
                         continue;
                     }
@@ -1053,14 +1051,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                         eprintln!("POST failed ({}): {}", status, err_text);
                         if let Some(id) = msg.get("id").cloned() {
                             let safe_text = truncate_error_text(&err_text);
-                            let err_resp = build_jsonrpc_error(
+                            write_jsonrpc_error(
+                                &mut out,
                                 id,
                                 -32603,
                                 &format!("Upstream HTTP error {}: {}", status.as_u16(), safe_text),
-                            );
-                            let body = serde_json::to_string(&err_resp)?;
-                            out.write_all(format!("{}\n", body).as_bytes()).await?;
-                            out.flush().await?;
+                            )
+                            .await?;
                         }
                         continue;
                     }
@@ -1143,11 +1140,13 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 Err(e) => {
                     eprintln!("POST Error: {}", e);
                     if let Some(id) = msg.get("id").cloned() {
-                        let err_resp =
-                            build_jsonrpc_error(id, -32603, &format!("Connection error: {}", e));
-                        let body = serde_json::to_string(&err_resp)?;
-                        out.write_all(format!("{}\n", body).as_bytes()).await?;
-                        out.flush().await?;
+                        write_jsonrpc_error(
+                            &mut out,
+                            id,
+                            -32603,
+                            &format!("Connection error: {}", e),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1766,12 +1765,29 @@ fn build_jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
     })
 }
 
+async fn write_jsonrpc_error(
+    out: &mut (impl tokio::io::AsyncWriteExt + Unpin),
+    id: Value,
+    code: i64,
+    message: &str,
+) -> Result<()> {
+    let err_resp = build_jsonrpc_error(id, code, message);
+    let body = serde_json::to_string(&err_resp)?;
+    out.write_all(format!("{}\n", body).as_bytes()).await?;
+    out.flush().await?;
+    Ok(())
+}
+
 fn truncate_error_text(text: &str) -> &str {
     const MAX_LEN: usize = 200;
     if text.len() <= MAX_LEN {
         text
     } else {
-        &text[..MAX_LEN]
+        let mut end = MAX_LEN;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
     }
 }
 
@@ -3497,6 +3513,34 @@ mod tests {
     fn test_build_jsonrpc_error_preserves_null_id() {
         let err = build_jsonrpc_error(Value::Null, -32603, "fail");
         assert!(err["id"].is_null());
+    }
+
+    // --- truncate_error_text tests ---
+
+    #[test]
+    fn test_truncate_short_ascii() {
+        let text = "Short error";
+        assert_eq!(truncate_error_text(text), "Short error");
+    }
+
+    #[test]
+    fn test_truncate_long_ascii() {
+        let text = "x".repeat(300);
+        let result = truncate_error_text(&text);
+        assert_eq!(result.len(), 200);
+        assert_eq!(result, "x".repeat(200));
+    }
+
+    #[test]
+    fn test_truncate_long_unicode() {
+        // Each emoji is 4 bytes; 60 emojis = 240 bytes > 200
+        let text = "\u{1F600}".repeat(60);
+        let result = truncate_error_text(&text);
+        // Should not panic and should be valid UTF-8
+        assert!(result.len() <= 200);
+        // Should land on a char boundary (multiple of 4 for these emojis)
+        assert!(result.len() % 4 == 0);
+        let _ = result.to_string(); // valid UTF-8
     }
 
     // --- inject_token tests for all tools ---
