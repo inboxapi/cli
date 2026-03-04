@@ -1391,8 +1391,8 @@ sending summaries, sharing results, drafting messages, or following up on tasks.
 
 /// Build a User-Agent string from MCP `clientInfo`.
 ///
-/// Sanitizes name/version to printable ASCII and truncates to prevent
-/// oversized headers. Produces strings like:
+/// Sanitizes name/version to ASCII graphic characters (no spaces or control
+/// chars) and truncates to prevent oversized headers. Produces strings like:
 ///   `inboxapi-cli/0.2.21 (claude-code/1.0.82)`
 fn build_client_user_agent(info: &Value) -> String {
     fn sanitize(s: &str, max_len: usize) -> String {
@@ -4073,7 +4073,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_client_user_agent_sanitizes_non_ascii() {
+    fn test_build_client_user_agent_strips_control_chars_and_spaces() {
         let info = json!({"name": "bad\x00name with spaces", "version": "1.0"});
         let ua = build_client_user_agent(&info);
         // Control chars and spaces stripped from name/version (only ascii graphic kept)
