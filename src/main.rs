@@ -902,12 +902,11 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                             .unwrap_or_else(|_| "Unknown error".to_string());
                         eprintln!("POST failed ({}): {}", status, err_text);
                         if let Some(id) = msg.get("id").cloned() {
-                            let safe_text = truncate_error_text(&err_text);
                             write_jsonrpc_error(
                                 &mut out,
                                 id,
                                 -32603,
-                                &format!("Upstream HTTP error {}: {}", status.as_u16(), safe_text),
+                                &format!("Upstream HTTP error {}", status.as_u16()),
                             )
                             .await?;
                         }
@@ -1050,12 +1049,11 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                             .unwrap_or_else(|_| "Unknown error".to_string());
                         eprintln!("POST failed ({}): {}", status, err_text);
                         if let Some(id) = msg.get("id").cloned() {
-                            let safe_text = truncate_error_text(&err_text);
                             write_jsonrpc_error(
                                 &mut out,
                                 id,
                                 -32603,
-                                &format!("Upstream HTTP error {}: {}", status.as_u16(), safe_text),
+                                &format!("Upstream HTTP error {}", status.as_u16()),
                             )
                             .await?;
                         }
@@ -1776,19 +1774,6 @@ async fn write_jsonrpc_error(
     out.write_all(format!("{}\n", body).as_bytes()).await?;
     out.flush().await?;
     Ok(())
-}
-
-fn truncate_error_text(text: &str) -> &str {
-    const MAX_LEN: usize = 200;
-    if text.len() <= MAX_LEN {
-        text
-    } else {
-        let mut end = MAX_LEN;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        &text[..end]
-    }
 }
 
 fn inject_token(msg: &mut Value, token: &str) {
@@ -3513,34 +3498,6 @@ mod tests {
     fn test_build_jsonrpc_error_preserves_null_id() {
         let err = build_jsonrpc_error(Value::Null, -32603, "fail");
         assert!(err["id"].is_null());
-    }
-
-    // --- truncate_error_text tests ---
-
-    #[test]
-    fn test_truncate_short_ascii() {
-        let text = "Short error";
-        assert_eq!(truncate_error_text(text), "Short error");
-    }
-
-    #[test]
-    fn test_truncate_long_ascii() {
-        let text = "x".repeat(300);
-        let result = truncate_error_text(&text);
-        assert_eq!(result.len(), 200);
-        assert_eq!(result, "x".repeat(200));
-    }
-
-    #[test]
-    fn test_truncate_long_unicode() {
-        // Each emoji is 4 bytes; 60 emojis = 240 bytes > 200
-        let text = "\u{1F600}".repeat(60);
-        let result = truncate_error_text(&text);
-        // Should not panic and should be valid UTF-8
-        assert!(result.len() <= 200);
-        // Should land on a char boundary (multiple of 4 for these emojis)
-        assert!(result.len() % 4 == 0);
-        let _ = result.to_string(); // valid UTF-8
     }
 
     // --- inject_token tests for all tools ---
