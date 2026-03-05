@@ -6,3 +6,4 @@ npm/cli-*/inboxapi-cli.exe
 dist/
 *.tgz
 .worktrees/
+.playwright-mcp/
