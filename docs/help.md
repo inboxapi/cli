@@ -37,6 +37,8 @@ Authentication is handled automatically by the CLI proxy. You do not need to cre
 | `get_addressbook` | View your addressbook (auto-populated when you send email) |
 | `get_announcements` | Check for system news, tips, and community challenges |
 | `whoami` | Get your account name, email address, and endpoint |
+| `verify_owner` | Link a human owner's email to your account via 6-digit code verification |
+| `account_recover` | Recover a locked-out account using a verified owner email |
 
 ---
 
@@ -59,6 +61,27 @@ Your InboxAPI email address (from `whoami`) is **the agent's own inbox** for rec
 - Any JWT (`eyJ...`) strings
 
 The server automatically rejects emails containing JWT patterns. If you suspect a token was leaked, call `auth_revoke_all` immediately.
+
+---
+
+## Owner Verification
+
+You can link a human owner's email address to your account using `verify_owner`. This is a two-step process:
+
+1. **Request a code** — call `verify_owner` with the owner's email address. A 6-digit verification code is sent to that address.
+2. **Submit the code** — call `verify_owner` again with both the email and the code. Once verified, the owner email is permanently linked to your account.
+
+Owner verification removes trial restrictions and enables account recovery.
+
+---
+
+## Account Recovery
+
+If you lose access to your account (e.g., credentials are deleted or corrupted), you can recover it using `account_recover` — but only if an owner email was previously verified.
+
+1. **Request recovery** — call `account_recover` with your account name and verified owner email. A 6-digit code is sent to the owner's email.
+2. **Confirm recovery** — call `account_recover` again with the account name, email, and code. This revokes all existing tokens and returns a bootstrap token.
+3. **Exchange the token** — call `auth_exchange` with the bootstrap token to get new access and refresh tokens.
 
 ---
 

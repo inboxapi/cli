@@ -47,6 +47,7 @@ The CLI acts as a local bridge between your AI client and the [InboxAPI](https:/
 - **Check your spam folder** — Each agent gets its own subdomain, and new subdomains don't have email reputation yet. Early messages may land in your recipient's spam or junk folder. Adding your agent's email address to your contacts or allowlist helps. Delivery improves over time as recipients interact with your agent's emails.
 - **No attachments yet** — Attachment support is not available right now, but it's coming soon.
 - **No rich text yet** — Emails are sent as plain text only. Rich text (HTML) support is coming soon.
+- **Owner verification** — Link your email to your agent's account with `verify_owner` to enable account recovery and remove trial restrictions. Recommended as a first step after setup.
 
 ## Installation
 
@@ -327,6 +328,14 @@ HTML email support is coming soon. Currently emails are sent as plain text.
 
 Your agent's credentials are stored locally at `~/.config/inboxapi/credentials.json` (Linux) or `~/Library/Application Support/inboxapi/credentials.json` (macOS). The CLI handles token creation and refresh automatically — your agent never needs to manage tokens manually.
 
+### What if my agent loses access?
+
+If your agent's credentials are lost or corrupted, you can recover the account using the `account_recover` tool — but only if you previously linked your email via `verify_owner`. Recovery revokes all existing tokens and issues new credentials. Without a verified owner email, there is no way to recover a locked-out account.
+
+### What is owner verification?
+
+Owner verification links your personal email address to your agent's InboxAPI account. Your agent calls `verify_owner` with your email, you receive a 6-digit code, and your agent submits it to complete verification. Once verified, you can recover the account if credentials are ever lost, and trial restrictions are removed from the account.
+
 ### What domains are blocked from sending?
 
 InboxAPI maintains a denylist that blocks sending to government (.gov), military (.mil), intelligence, law enforcement, nuclear/critical infrastructure, and disposable email domains.
@@ -344,7 +353,7 @@ Every inbound email is classified into one of four trust levels:
 
 ### What AI model should I use with InboxAPI?
 
-Your model must support **tool/function calling** — MCP requires this. We recommend a minimum **32K token context window** to comfortably fit InboxAPI's 19 tool definitions alongside conversation history and email content.
+Your model must support **tool/function calling** — MCP requires this. We recommend a minimum **32K token context window** to comfortably fit InboxAPI's 21 tool definitions alongside conversation history and email content.
 
 **Model recommendations by tier:**
 
@@ -356,7 +365,7 @@ Your model must support **tool/function calling** — MCP requires this. We reco
 
 **Datamarking overhead:** InboxAPI applies datamarking (spotlighting) to untrusted email content, replacing whitespace with Unicode marker characters. This can slightly increase token consumption when processing emails from external senders. Models with larger context windows handle this more comfortably.
 
-**What won't work:** Models without tool/function calling support, models with context windows under 16K tokens, and very small local models (under ~7B parameters) that lack reliable tool calling. These will struggle to fit InboxAPI's 19 tool definitions and maintain useful conversation history.
+**What won't work:** Models without tool/function calling support, models with context windows under 16K tokens, and very small local models (under ~7B parameters) that lack reliable tool calling. These will struggle to fit InboxAPI's 21 tool definitions and maintain useful conversation history.
 
 ### What stops an agent from buying things or authorizing transactions via email?
 
