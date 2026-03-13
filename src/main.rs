@@ -67,6 +67,8 @@ struct Credentials {
     endpoint: String,
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    encryption_secret: Option<String>,
 }
 
 fn get_credentials_path() -> Result<PathBuf> {
@@ -869,7 +871,7 @@ async fn run_proxy(endpoint: String) -> Result<()> {
 
         // Inject token if needed
         if let Some(creds) = &creds {
-            inject_token(&mut msg, &creds.access_token);
+            inject_token(&mut msg, creds);
         }
         strip_domain(&mut msg);
 
@@ -947,7 +949,8 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                                 .await
                             {
                                 Ok(new_creds) => {
-                                    // Overwrite token for retry (inject_token skips if key exists)
+                                    // Overwrite token and encryption_secret for retry
+                                    // (inject_token skips if key exists)
                                     if let Some(args) = msg
                                         .get_mut("params")
                                         .and_then(|p| p.get_mut("arguments"))
@@ -957,6 +960,16 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                                             "token".to_string(),
                                             json!(new_creds.access_token.clone()),
                                         );
+                                        // Refresh encryption_secret from new credentials;
+                                        // if absent (e.g. after account recreation), remove stale value
+                                        if let Some(ref secret) = new_creds.encryption_secret {
+                                            args.insert(
+                                                "encryption_secret".to_string(),
+                                                json!(secret.clone()),
+                                            );
+                                        } else {
+                                            args.remove("encryption_secret");
+                                        }
                                     }
                                     creds = Some(new_creds);
 
@@ -1312,6 +1325,7 @@ async fn refresh_access_token(
         account_name: creds.account_name.clone(),
         endpoint: endpoint.to_string(),
         email: creds.email.clone(),
+        encryption_secret: creds.encryption_secret.clone(),
     };
 
     save_credentials(&new_creds)?;
@@ -1717,17 +1731,20 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
                     }
                 }
 
-                // Strip `token` from every tool's inputSchema
+                // Strip `token` and `encryption_secret` from every tool's inputSchema
                 if let Some(schema) = tool.get_mut("inputSchema").and_then(|s| s.as_object_mut()) {
                     if let Some(props) =
                         schema.get_mut("properties").and_then(|p| p.as_object_mut())
                     {
                         props.remove("token");
+                        props.remove("encryption_secret");
                     }
                     if let Some(required) =
                         schema.get_mut("required").and_then(|r| r.as_array_mut())
                     {
-                        required.retain(|v| v.as_str() != Some("token"));
+                        required.retain(|v| {
+                            v.as_str() != Some("token") && v.as_str() != Some("encryption_secret")
+                        });
                     }
                 }
             }
@@ -1818,7 +1835,7 @@ async fn write_jsonrpc_error(
     Ok(())
 }
 
-fn inject_token(msg: &mut Value, token: &str) {
+fn inject_token(msg: &mut Value, credentials: &Credentials) {
     if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
         // Only inject for tool calls
         if method == "tools/call" {
@@ -1845,7 +1862,18 @@ fn inject_token(msg: &mut Value, token: &str) {
                     {
                         // Only inject if token is not already present
                         if !arguments.contains_key("token") {
-                            arguments.insert("token".to_string(), json!(token));
+                            arguments.insert("token".to_string(), json!(credentials.access_token));
+
+                            // Inject encryption_secret only when we also injected the token,
+                            // since a pre-existing token may not match our credentials.
+                            if let Some(ref secret) = credentials.encryption_secret {
+                                if !arguments.contains_key("encryption_secret") {
+                                    arguments.insert(
+                                        "encryption_secret".to_string(),
+                                        serde_json::json!(secret),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -2063,6 +2091,7 @@ async fn create_account_and_authenticate(
         .ok_or_else(|| anyhow!("Missing refresh_token"))?;
 
     let email = account_data["email"].as_str().map(String::from);
+    let encryption_secret = account_data["encryption_secret"].as_str().map(String::from);
 
     let creds = Credentials {
         access_token: access_token.to_string(),
@@ -2070,6 +2099,7 @@ async fn create_account_and_authenticate(
         account_name: name.to_string(),
         endpoint: endpoint.to_string(),
         email,
+        encryption_secret,
     };
 
     save_credentials(&creds)?;
@@ -2161,6 +2191,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn make_creds(token: &str) -> Credentials {
+        Credentials {
+            access_token: token.to_string(),
+            refresh_token: String::new(),
+            account_name: String::new(),
+            endpoint: String::new(),
+            email: None,
+            encryption_secret: None,
+        }
+    }
+
     // --- inject_token tests ---
 
     fn make_tools_call(tool_name: &str, arguments: Value) -> Value {
@@ -2178,7 +2219,7 @@ mod tests {
     #[test]
     fn inject_token_adds_token_to_regular_tool() {
         let mut msg = make_tools_call("get_emails", json!({"limit": 10}));
-        inject_token(&mut msg, "test-token-123");
+        inject_token(&mut msg, &make_creds("test-token-123"));
 
         let token = msg["params"]["arguments"]["token"].as_str().unwrap();
         assert_eq!(token, "test-token-123");
@@ -2187,7 +2228,7 @@ mod tests {
     #[test]
     fn inject_token_preserves_existing_arguments() {
         let mut msg = make_tools_call("get_emails", json!({"limit": 10, "folder": "inbox"}));
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert_eq!(msg["params"]["arguments"]["limit"], 10);
         assert_eq!(msg["params"]["arguments"]["folder"], "inbox");
@@ -2197,16 +2238,64 @@ mod tests {
     #[test]
     fn inject_token_does_not_overwrite_existing_token() {
         let mut msg = make_tools_call("get_emails", json!({"token": "user-provided-token"}));
-        inject_token(&mut msg, "injected-token");
+        inject_token(&mut msg, &make_creds("injected-token"));
 
         let token = msg["params"]["arguments"]["token"].as_str().unwrap();
         assert_eq!(token, "user-provided-token");
     }
 
+    fn make_creds_with_secret(token: &str, secret: &str) -> Credentials {
+        Credentials {
+            access_token: token.to_string(),
+            refresh_token: String::new(),
+            account_name: String::new(),
+            endpoint: String::new(),
+            email: None,
+            encryption_secret: Some(secret.to_string()),
+        }
+    }
+
+    #[test]
+    fn inject_token_injects_encryption_secret() {
+        let mut msg = make_tools_call("get_emails", json!({"limit": 10}));
+        inject_token(&mut msg, &make_creds_with_secret("tok", "my-secret"));
+
+        let secret = msg["params"]["arguments"]["encryption_secret"]
+            .as_str()
+            .unwrap();
+        assert_eq!(secret, "my-secret");
+    }
+
+    #[test]
+    fn inject_token_does_not_overwrite_existing_encryption_secret() {
+        let mut msg = make_tools_call(
+            "get_emails",
+            json!({"encryption_secret": "user-provided-secret"}),
+        );
+        inject_token(&mut msg, &make_creds_with_secret("tok", "injected-secret"));
+
+        let secret = msg["params"]["arguments"]["encryption_secret"]
+            .as_str()
+            .unwrap();
+        assert_eq!(secret, "user-provided-secret");
+    }
+
+    #[test]
+    fn inject_token_does_not_inject_encryption_secret_when_token_already_present() {
+        let mut msg = make_tools_call("get_emails", json!({"token": "user-provided-token"}));
+        inject_token(&mut msg, &make_creds_with_secret("our-token", "our-secret"));
+
+        // Token should remain the user-provided one
+        let token = msg["params"]["arguments"]["token"].as_str().unwrap();
+        assert_eq!(token, "user-provided-token");
+        // encryption_secret should NOT be injected since we didn't inject the token
+        assert!(msg["params"]["arguments"]["encryption_secret"].is_null());
+    }
+
     #[test]
     fn inject_token_skips_help() {
         let mut msg = make_tools_call("help", json!({}));
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert!(msg["params"]["arguments"]["token"].is_null());
     }
@@ -2214,7 +2303,7 @@ mod tests {
     #[test]
     fn inject_token_skips_account_create() {
         let mut msg = make_tools_call("account_create", json!({"name": "test", "hashcash": "abc"}));
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert!(msg["params"]["arguments"]["token"].is_null());
     }
@@ -2222,7 +2311,7 @@ mod tests {
     #[test]
     fn inject_token_skips_auth_exchange() {
         let mut msg = make_tools_call("auth_exchange", json!({"bootstrap_token": "abc"}));
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert!(msg["params"]["arguments"]["token"].is_null());
     }
@@ -2230,7 +2319,7 @@ mod tests {
     #[test]
     fn inject_token_skips_auth_refresh() {
         let mut msg = make_tools_call("auth_refresh", json!({"refresh_token": "abc"}));
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert!(msg["params"]["arguments"]["token"].is_null());
     }
@@ -2241,7 +2330,7 @@ mod tests {
             "account_recover",
             json!({"account_name": "test", "owner_email": "a@b.com"}),
         );
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert!(msg["params"]["arguments"]["token"].is_null());
     }
@@ -2255,7 +2344,7 @@ mod tests {
             "params": {}
         });
         let original = msg.clone();
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert_eq!(msg, original);
     }
@@ -2267,7 +2356,7 @@ mod tests {
             "method": "notifications/initialized"
         });
         let original = msg.clone();
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert_eq!(msg, original);
     }
@@ -2280,7 +2369,7 @@ mod tests {
             "method": "tools/call"
         });
         let original = msg.clone();
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert_eq!(msg, original);
     }
@@ -2295,7 +2384,7 @@ mod tests {
                 "name": "get_emails"
             }
         });
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         // Creates arguments object and injects token
         let args = msg["params"]["arguments"].as_object().unwrap();
@@ -2313,7 +2402,7 @@ mod tests {
             }
         });
         let original = msg.clone();
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert_eq!(msg, original);
     }
@@ -2330,7 +2419,7 @@ mod tests {
             }
         });
         let original = msg.clone();
-        inject_token(&mut msg, "test-token");
+        inject_token(&mut msg, &make_creds("test-token"));
 
         assert_eq!(msg, original);
     }
@@ -2345,6 +2434,7 @@ mod tests {
             account_name: "testuser".to_string(),
             endpoint: "https://mcp.inboxapi.ai/mcp".to_string(),
             email: Some("test@example.com".to_string()),
+            encryption_secret: None,
         };
 
         let json_str = serde_json::to_string(&creds).unwrap();
@@ -2588,6 +2678,7 @@ mod tests {
             account_name: "test-agent".to_string(),
             endpoint: "https://example.com".to_string(),
             email: Some("test-agent@inboxapi.io".to_string()),
+            encryption_secret: None,
         };
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
         let modified = inject_initialize_instructions(body, Some(&creds), None);
@@ -2707,6 +2798,7 @@ mod tests {
             account_name: "cool-agent".to_string(),
             endpoint: "https://example.com".to_string(),
             email: Some("cool-agent@inboxapi.io".to_string()),
+            encryption_secret: None,
         }
     }
 
@@ -2808,6 +2900,7 @@ mod tests {
             account_name: "no-email-agent".to_string(),
             endpoint: "https://example.com".to_string(),
             email: None,
+            encryption_secret: None,
         }
     }
 
@@ -3575,7 +3668,7 @@ mod tests {
             "send_reply",
             json!({"in_reply_to": "<msg@test>", "body": "Thanks"}),
         );
-        inject_token(&mut msg, "tok-123");
+        inject_token(&mut msg, &make_creds("tok-123"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args["token"], "tok-123");
         assert_eq!(args["in_reply_to"], "<msg@test>");
@@ -3588,7 +3681,7 @@ mod tests {
             "send_email",
             json!({"to": ["a@b.com"], "subject": "Hi", "body": "Hello"}),
         );
-        inject_token(&mut msg, "tok-456");
+        inject_token(&mut msg, &make_creds("tok-456"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args["token"], "tok-456");
         assert_eq!(args["subject"], "Hi");
@@ -3600,7 +3693,7 @@ mod tests {
             "forward_email",
             json!({"message_id": "<fwd@test>", "to": ["c@d.com"]}),
         );
-        inject_token(&mut msg, "tok-789");
+        inject_token(&mut msg, &make_creds("tok-789"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args["token"], "tok-789");
         assert_eq!(args["message_id"], "<fwd@test>");
@@ -3609,35 +3702,35 @@ mod tests {
     #[test]
     fn test_inject_token_get_emails() {
         let mut msg = make_tools_call("get_emails", json!({"limit": 20}));
-        inject_token(&mut msg, "tok-ge");
+        inject_token(&mut msg, &make_creds("tok-ge"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-ge");
     }
 
     #[test]
     fn test_inject_token_get_email() {
         let mut msg = make_tools_call("get_email", json!({"index": 0}));
-        inject_token(&mut msg, "tok-ge1");
+        inject_token(&mut msg, &make_creds("tok-ge1"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-ge1");
     }
 
     #[test]
     fn test_inject_token_get_last_email() {
         let mut msg = make_tools_call("get_last_email", json!({}));
-        inject_token(&mut msg, "tok-gle");
+        inject_token(&mut msg, &make_creds("tok-gle"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-gle");
     }
 
     #[test]
     fn test_inject_token_get_email_count() {
         let mut msg = make_tools_call("get_email_count", json!({}));
-        inject_token(&mut msg, "tok-gec");
+        inject_token(&mut msg, &make_creds("tok-gec"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-gec");
     }
 
     #[test]
     fn test_inject_token_search_emails() {
         let mut msg = make_tools_call("search_emails", json!({"sender": "alice"}));
-        inject_token(&mut msg, "tok-se");
+        inject_token(&mut msg, &make_creds("tok-se"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-se");
         assert_eq!(msg["params"]["arguments"]["sender"], "alice");
     }
@@ -3645,7 +3738,7 @@ mod tests {
     #[test]
     fn test_inject_token_get_thread() {
         let mut msg = make_tools_call("get_thread", json!({"message_id": "<t@x>"}));
-        inject_token(&mut msg, "tok-gt");
+        inject_token(&mut msg, &make_creds("tok-gt"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-gt");
         assert_eq!(msg["params"]["arguments"]["message_id"], "<t@x>");
     }
@@ -3653,21 +3746,21 @@ mod tests {
     #[test]
     fn test_inject_token_get_sent_emails() {
         let mut msg = make_tools_call("get_sent_emails", json!({}));
-        inject_token(&mut msg, "tok-gse");
+        inject_token(&mut msg, &make_creds("tok-gse"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-gse");
     }
 
     #[test]
     fn test_inject_token_get_addressbook() {
         let mut msg = make_tools_call("get_addressbook", json!({}));
-        inject_token(&mut msg, "tok-gab");
+        inject_token(&mut msg, &make_creds("tok-gab"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-gab");
     }
 
     #[test]
     fn test_inject_token_get_announcements() {
         let mut msg = make_tools_call("get_announcements", json!({}));
-        inject_token(&mut msg, "tok-ga");
+        inject_token(&mut msg, &make_creds("tok-ga"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-ga");
     }
 
@@ -3813,6 +3906,7 @@ mod tests {
             refresh_token: "rt".to_string(),
             endpoint: "https://example.com".to_string(),
             email: Some("test-agent@test.inboxapi.ai".to_string()),
+            encryption_secret: None,
         }
     }
 
@@ -3894,7 +3988,7 @@ mod tests {
                 "priority": "high"
             }),
         );
-        inject_token(&mut msg, "tok");
+        inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args["in_reply_to"], "<msg@test>");
         assert_eq!(args["body"], "Thanks");
@@ -3922,7 +4016,7 @@ mod tests {
                 "priority": "low"
             }),
         );
-        inject_token(&mut msg, "tok");
+        inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args["to"], json!(["a@b.com"]));
         assert_eq!(args["subject"], "Hi");
@@ -3947,7 +4041,7 @@ mod tests {
                 "note": "FYI"
             }),
         );
-        inject_token(&mut msg, "tok");
+        inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args["message_id"], "<fwd@test>");
         assert_eq!(args["to"], json!(["x@y.com"]));
@@ -3962,7 +4056,7 @@ mod tests {
     #[test]
     fn test_inject_token_empty_arguments_object() {
         let mut msg = make_tools_call("get_emails", json!({}));
-        inject_token(&mut msg, "tok-empty");
+        inject_token(&mut msg, &make_creds("tok-empty"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-empty");
     }
 
@@ -3976,7 +4070,7 @@ mod tests {
                 "name": "get_emails"
             }
         });
-        inject_token(&mut msg, "tok-missing");
+        inject_token(&mut msg, &make_creds("tok-missing"));
         assert_eq!(msg["params"]["arguments"]["token"], "tok-missing");
     }
 
@@ -3991,7 +4085,7 @@ mod tests {
                 "arguments": null
             }
         });
-        inject_token(&mut msg, "tok-null");
+        inject_token(&mut msg, &make_creds("tok-null"));
         // null arguments can't be coerced into an object, so token is not injected
         assert!(msg["params"]["arguments"].is_null());
         assert!(msg["params"]["arguments"].get("token").is_none());
@@ -4012,7 +4106,7 @@ mod tests {
                 "priority": "high"
             }),
         );
-        inject_token(&mut msg, "tok");
+        inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args.len(), 9); // 8 fields + token
         assert_eq!(args["token"], "tok");
@@ -4024,7 +4118,7 @@ mod tests {
             "send_reply",
             json!({"in_reply_to": "<msg@test>", "body": "reply"}),
         );
-        inject_token(&mut msg, "tok");
+        inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
         assert_eq!(args.len(), 3); // in_reply_to + body + token
         assert_eq!(args["in_reply_to"], "<msg@test>");

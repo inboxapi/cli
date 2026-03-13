@@ -50,8 +50,11 @@ function main() {
   try {
     const creds = JSON.parse(fs.readFileSync(credPath, "utf8"));
     const email = creds.email || creds.account_name || "(unknown)";
+    const encryptionStatus = creds.encryption_secret
+      ? "enabled (secret present in credentials)"
+      : "not configured";
     process.stderr.write(
-      `\n[InboxAPI] Authenticated as: ${email}\n\n`,
+      `\n[InboxAPI] Authenticated as: ${email}\n[InboxAPI] Encryption: ${encryptionStatus}\n\n`,
     );
   } catch {
     process.stderr.write(
