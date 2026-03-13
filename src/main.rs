@@ -949,7 +949,8 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                                 .await
                             {
                                 Ok(new_creds) => {
-                                    // Overwrite token for retry (inject_token skips if key exists)
+                                    // Overwrite token and encryption_secret for retry
+                                    // (inject_token skips if key exists)
                                     if let Some(args) = msg
                                         .get_mut("params")
                                         .and_then(|p| p.get_mut("arguments"))
@@ -959,6 +960,16 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                                             "token".to_string(),
                                             json!(new_creds.access_token.clone()),
                                         );
+                                        // Refresh encryption_secret from new credentials;
+                                        // if absent (e.g. after account recreation), remove stale value
+                                        if let Some(ref secret) = new_creds.encryption_secret {
+                                            args.insert(
+                                                "encryption_secret".to_string(),
+                                                json!(secret.clone()),
+                                            );
+                                        } else {
+                                            args.remove("encryption_secret");
+                                        }
                                     }
                                     creds = Some(new_creds);
 
