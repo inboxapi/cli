@@ -7768,32 +7768,41 @@ mod tests {
     fn test_verify_owner_accepts_owner_email_flag_and_email_alias() {
         let cli =
             Cli::try_parse_from(["inboxapi", "verify-owner", "--owner-email", "a@b.com"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::VerifyOwner {
-                owner_email,
-                code: None
-            }) if owner_email == "a@b.com"
-        ));
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::VerifyOwner {
+                    owner_email,
+                    code: None
+                }) if owner_email == "a@b.com"
+            ),
+            "verify-owner should parse the --owner-email flag with no code"
+        );
 
         let cli = Cli::try_parse_from(["inboxapi", "verify-owner", "--email", "a@b.com"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::VerifyOwner {
-                owner_email,
-                code: None
-            }) if owner_email == "a@b.com"
-        ));
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::VerifyOwner {
+                    owner_email,
+                    code: None
+                }) if owner_email == "a@b.com"
+            ),
+            "verify-owner should parse the --email alias with no code"
+        );
 
         let cli =
             Cli::try_parse_from(["inboxapi", "verify-owner", "--owner_email", "a@b.com"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::VerifyOwner {
-                owner_email,
-                code: None
-            }) if owner_email == "a@b.com"
-        ));
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::VerifyOwner {
+                    owner_email,
+                    code: None
+                }) if owner_email == "a@b.com"
+            ),
+            "verify-owner should parse the --owner_email alias with no code"
+        );
     }
 
     #[test]
