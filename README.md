@@ -190,12 +190,12 @@ inboxapi get-email "<message-id>"
 
 ### `delete-email`
 
+Soft-deletes a received email by message id. It prompts for confirmation by default, and scripted or piped use must pass `--force`.
+
 ```bash
 inboxapi delete-email "<message-id>"
 inboxapi delete-email "<message-id>" --force
 ```
-
-The command prompts for confirmation by default. In non-interactive use, pass `--force` or the command will refuse to run.
 
 ### `search-emails`
 

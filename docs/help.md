@@ -79,14 +79,14 @@ Your InboxAPI email address (from `whoami`) is **the agent's own inbox** for rec
 
 Use `delete_email` to hide a received message from the normal inbox views. This is a soft delete: the message is removed from `get_last_email`, `get_emails`, `get_email`, `search_emails`, `get_email_count`, and `get_thread`, but there is no restore or trash command yet.
 
+The CLI prompts for confirmation by default. If stdin is not a TTY, you must pass `--force` or it will error instead of deleting.
+
 CLI example:
 
 ```bash
 inboxapi delete-email "<message-id>"
 inboxapi delete-email "<message-id>" --force
 ```
-
-The command prompts for confirmation by default. If stdin is not a TTY, you must pass `--force` or it will error instead of deleting.
 
 ---
 
