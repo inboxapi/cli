@@ -1695,6 +1695,105 @@ fn extract_tool_result_text(response: &Value) -> Result<String> {
         .ok_or_else(|| anyhow!("No text content in response"))
 }
 
+fn extract_message_id(text: &str) -> Option<String> {
+    let data: Value = serde_json::from_str(text).ok()?;
+    data["message_id"]
+        .as_str()
+        .or_else(|| data["messageId"].as_str())
+        .map(ToOwned::to_owned)
+}
+
+fn message_has_visible_body(message: &Value) -> bool {
+    let body = message["body"]
+        .as_str()
+        .or_else(|| message["text_body"].as_str())
+        .or_else(|| message["textBody"].as_str())
+        .unwrap_or_default();
+    let html_body = message["html_body"]
+        .as_str()
+        .or_else(|| message["htmlBody"].as_str())
+        .unwrap_or_default();
+    !body.is_empty() || !html_body.is_empty()
+}
+
+fn sent_email_items(sent_items: &Value) -> Option<&Vec<Value>> {
+    sent_items
+        .as_array()
+        .or_else(|| sent_items["sent_emails"].as_array())
+        .or_else(|| sent_items["emails"].as_array())
+        .or_else(|| sent_items["results"].as_array())
+}
+
+fn find_recent_sent_message<'a>(sent_items: &'a Value, message_id: &str) -> Option<&'a Value> {
+    sent_email_items(sent_items)?.iter().find(|item| {
+        item["message_id"]
+            .as_str()
+            .or_else(|| item["messageId"].as_str())
+            .is_some_and(|id| id == message_id)
+    })
+}
+
+async fn verify_send_reply_delivery(
+    endpoint: &str,
+    creds: &mut Option<Credentials>,
+    http_client: &HttpClient,
+    response_text: &str,
+) -> Result<()> {
+    let Some(message_id) = extract_message_id(response_text) else {
+        return Ok(());
+    };
+
+    const SEND_REPLY_VERIFY_ATTEMPTS: usize = 6;
+
+    for attempt in 0..SEND_REPLY_VERIFY_ATTEMPTS {
+        let response = call_mcp_tool(
+            endpoint,
+            creds,
+            http_client,
+            "get_sent_emails",
+            json!({"limit": 10}),
+        )
+        .await?;
+        let sent_text = extract_tool_result_text(&response)?;
+        if let Ok(sent_items) = serde_json::from_str::<Value>(&sent_text) {
+            if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
+                if message_has_visible_body(message) {
+                    return Ok(());
+                }
+                if let Ok(email_response) = call_mcp_tool(
+                    endpoint,
+                    creds,
+                    http_client,
+                    "get_email",
+                    json!({"message_id": message_id, "content_format": "all"}),
+                )
+                .await
+                {
+                    if let Ok(email_text) = extract_tool_result_text(&email_response) {
+                        if let Ok(email) = serde_json::from_str::<Value>(&email_text) {
+                            if message_has_visible_body(&email) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
+                    return Err(anyhow!(
+                        "send-reply reported success, but sent message {} has an empty body",
+                        message_id
+                    ));
+                }
+            }
+        }
+
+        if attempt + 1 < SEND_REPLY_VERIFY_ATTEMPTS {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    Ok(())
+}
+
 /// Split a comma-separated string into a Vec of trimmed strings.
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')
@@ -2665,6 +2764,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
             let response =
                 call_mcp_tool(&endpoint, &mut creds, &http_client, "send_reply", args).await?;
             let text = extract_tool_result_text(&response)?;
+            verify_send_reply_delivery(&endpoint, &mut creds, &http_client, &text).await?;
             print_result("send_reply", &text, cli.human);
         }
         Some(Commands::ForwardEmail {
@@ -7000,6 +7100,50 @@ mod tests {
         assert_eq!(attachments[1]["filename"], "photo.jpg");
         assert_eq!(attachments[1]["content_type"], "image/jpeg");
         assert_eq!(args["token"], "tok");
+    }
+
+    #[test]
+    fn test_extract_message_id_from_send_reply_result() {
+        let text = r#"{"message_id":"<reply@test>","status":"queued"}"#;
+        assert_eq!(extract_message_id(text).as_deref(), Some("<reply@test>"));
+    }
+
+    #[test]
+    fn test_find_recent_sent_message_matches_message_id() {
+        let sent_items = json!([
+            {"message_id": "<one@test>", "body": "first"},
+            {"message_id": "<two@test>", "body": "second"}
+        ]);
+        let message = find_recent_sent_message(&sent_items, "<two@test>").unwrap();
+        assert_eq!(message["body"], "second");
+    }
+
+    #[test]
+    fn test_find_recent_sent_message_matches_wrapped_sent_emails() {
+        let sent_items = json!({
+            "total": 2,
+            "sent_emails": [
+                {"message_id": "<one@test>", "body": "first"},
+                {"message_id": "<two@test>", "body": "second"}
+            ],
+            "returned": 2
+        });
+        let message = find_recent_sent_message(&sent_items, "<two@test>").unwrap();
+        assert_eq!(message["body"], "second");
+    }
+
+    #[test]
+    fn test_message_has_visible_body_accepts_plain_or_html() {
+        assert!(message_has_visible_body(&json!({"body": "reply"})));
+        assert!(message_has_visible_body(&json!({"text_body": "reply"})));
+        assert!(message_has_visible_body(&json!({"textBody": "reply"})));
+        assert!(message_has_visible_body(
+            &json!({"html_body": "<p>reply</p>"})
+        ));
+        assert!(!message_has_visible_body(
+            &json!({"body": "", "html_body": ""})
+        ));
+        assert!(!message_has_visible_body(&json!({})));
     }
 
     #[test]
