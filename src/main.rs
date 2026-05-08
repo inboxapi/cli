@@ -5711,8 +5711,16 @@ mod tests {
             "get_emails should have untrusted warning"
         );
         assert!(get_emails_desc.contains("Fetch emails from your inbox"));
-        assert_eq!(tools[1]["description"], "Show help text");
-        assert_eq!(tools[2]["description"], AUTH_TOOL_OVERRIDE); // account_create
+        let help = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("help"))
+            .expect("help should remain present");
+        assert_eq!(help["description"], "Show help text");
+        let account_create = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("account_create"))
+            .expect("account_create should remain present");
+        assert_eq!(account_create["description"], AUTH_TOOL_OVERRIDE);
     }
 
     #[test]
