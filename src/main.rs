@@ -553,15 +553,23 @@ fn prompt_line(prompt: &str) -> Result<String> {
     Ok(input.trim().to_string())
 }
 
-fn confirm_delete_email(force: bool, message_id: &str) -> Result<bool> {
+fn delete_email_prompt_mode(force: bool, stdin_is_tty: bool) -> Result<bool> {
     if force {
-        return Ok(true);
+        return Ok(false);
     }
 
-    if !std::io::stdin().is_terminal() {
+    if !stdin_is_tty {
         return Err(anyhow!(
             "Refusing to delete email non-interactively without --force"
         ));
+    }
+
+    Ok(true)
+}
+
+fn confirm_delete_email(force: bool, message_id: &str) -> Result<bool> {
+    if !delete_email_prompt_mode(force, std::io::stdin().is_terminal())? {
+        return Ok(true);
     }
 
     Ok(prompt_yes_no(&format!(
@@ -7714,6 +7722,22 @@ mod tests {
                 Some(Commands::DeleteEmail { message_id, force: true }) if message_id == "<msg-id>"
             ),
             "CLI arguments for delete-email should be parsed correctly"
+        );
+    }
+
+    #[test]
+    fn test_delete_email_prompt_mode() {
+        assert!(
+            !delete_email_prompt_mode(true, false).expect("force should skip prompting"),
+            "force should bypass prompting even when stdin is not a TTY"
+        );
+        assert!(
+            delete_email_prompt_mode(false, true).expect("TTY stdin should allow prompting"),
+            "interactive stdin should prompt for confirmation"
+        );
+        assert!(
+            delete_email_prompt_mode(false, false).is_err(),
+            "non-interactive stdin without force should be rejected"
         );
     }
 
