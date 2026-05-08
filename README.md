@@ -188,6 +188,15 @@ inboxapi get-emails --limit 5 --human
 inboxapi get-email "<message-id>"
 ```
 
+### `delete-email`
+
+Soft-deletes a received email by message ID. It prompts for confirmation by default, and scripted or piped use must pass `--force`.
+
+```bash
+inboxapi delete-email "<message-id>"
+inboxapi delete-email "<message-id>" --force
+```
+
 ### `search-emails`
 
 ```bash

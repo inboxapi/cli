@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -149,6 +149,14 @@ enum Commands {
     GetEmail {
         /// The message ID to retrieve
         message_id: String,
+    },
+    /// Soft-delete a received email by message ID
+    DeleteEmail {
+        /// The message ID to delete
+        message_id: String,
+        /// Skip the destructive confirmation prompt
+        #[arg(long)]
+        force: bool,
     },
     /// Search emails by sender, subject, or date range
     SearchEmails {
@@ -543,6 +551,31 @@ fn prompt_line(prompt: &str) -> Result<String> {
         .read_line(&mut input)
         .context("Failed to read input")?;
     Ok(input.trim().to_string())
+}
+
+fn delete_email_prompt_mode(force: bool, stdin_is_tty: bool) -> Result<bool> {
+    if force {
+        return Ok(false);
+    }
+
+    if !stdin_is_tty {
+        return Err(anyhow!(
+            "Refusing to delete email non-interactively without --force"
+        ));
+    }
+
+    Ok(true)
+}
+
+fn confirm_delete_email(force: bool, message_id: &str) -> Result<bool> {
+    if !delete_email_prompt_mode(force, std::io::stdin().is_terminal())? {
+        return Ok(true);
+    }
+
+    Ok(prompt_yes_no(&format!(
+        "WARNING: This will hide {} from your inbox. Continue? [y/N] ",
+        message_id
+    )))
 }
 
 fn reset_credentials() -> Result<()> {
@@ -1398,6 +1431,7 @@ async fn main() -> Result<()> {
         Some(Commands::SendEmail { .. })
         | Some(Commands::GetEmails { .. })
         | Some(Commands::GetEmail { .. })
+        | Some(Commands::DeleteEmail { .. })
         | Some(Commands::SearchEmails { .. })
         | Some(Commands::GetAttachment { .. })
         | Some(Commands::SendReply { .. })
@@ -2097,6 +2131,17 @@ fn format_human_output(tool_name: &str, text: &str) -> String {
                 text.to_string()
             }
         }
+        "delete_email" => {
+            if let Ok(data) = serde_json::from_str::<Value>(text) {
+                let msg_id = data["message_id"]
+                    .as_str()
+                    .or_else(|| data["messageId"].as_str())
+                    .unwrap_or("unknown");
+                format!("Email deleted: {}", msg_id)
+            } else {
+                format!("Email deleted.\n{}", text)
+            }
+        }
         "send_reply" => {
             if let Ok(data) = serde_json::from_str::<Value>(text) {
                 let msg_id = data["message_id"]
@@ -2303,6 +2348,7 @@ Commands:
   send-email     Send an email (supports --attachment and --attachment-ref)
   get-emails     List inbox emails
   get-email      Get a single email by message ID
+  delete-email   Soft-delete a received email by message ID
   get-last-email  Get the most recent email
   get-email-count  Get inbox email count
   get-sent-emails  List sent emails
@@ -2337,6 +2383,7 @@ Examples:
   inboxapi send-email --to user@example.com --subject \"Fwd\" --body \"See attached\" --attachment-ref 9f0206bb-...
   inboxapi get-emails --limit 5
   inboxapi get-emails --limit 5 --human
+  inboxapi delete-email \"<msg-id>\" --force
   inboxapi get-last-email
   inboxapi get-email-count
   inboxapi get-sent-emails --limit 10
@@ -2468,6 +2515,20 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
                 call_mcp_tool(&endpoint, &mut creds, &http_client, "get_email", args).await?;
             let text = extract_tool_result_text(&response)?;
             print_result("get_email", &text, cli.human);
+        }
+        Some(Commands::DeleteEmail {
+            ref message_id,
+            force,
+        }) => {
+            if !confirm_delete_email(force, message_id)? {
+                println!("Aborted.");
+                return Ok(());
+            }
+            let args = json!({"message_id": message_id});
+            let response =
+                call_mcp_tool(&endpoint, &mut creds, &http_client, "delete_email", args).await?;
+            let text = extract_tool_result_text(&response)?;
+            print_result("delete_email", &text, cli.human);
         }
         Some(Commands::SearchEmails {
             ref sender,
@@ -7651,6 +7712,35 @@ mod tests {
         assert!(err.to_string().contains("--body-file"));
     }
 
+    #[test]
+    fn test_delete_email_parses_positional_message_id() {
+        let cli = Cli::try_parse_from(["inboxapi", "delete-email", "<msg-id>", "--force"]).unwrap();
+
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::DeleteEmail { message_id, force: true }) if message_id == "<msg-id>"
+            ),
+            "CLI arguments for delete-email should be parsed correctly"
+        );
+    }
+
+    #[test]
+    fn test_delete_email_prompt_mode() {
+        assert!(
+            !delete_email_prompt_mode(true, false).expect("force should skip prompting"),
+            "force should bypass prompting even when stdin is not a TTY"
+        );
+        assert!(
+            delete_email_prompt_mode(false, true).expect("TTY stdin should allow prompting"),
+            "interactive stdin should prompt for confirmation"
+        );
+        assert!(
+            delete_email_prompt_mode(false, false).is_err(),
+            "non-interactive stdin without force should be rejected"
+        );
+    }
+
     // --- guess_content_type tests ---
 
     #[test]
@@ -8031,6 +8121,16 @@ mod tests {
     }
 
     #[test]
+    fn test_human_output_delete_email() {
+        let text = r#"{"success": true, "message_id": "<deleted@test>"}"#;
+        let output = format_human_output("delete_email", text);
+        assert_eq!(
+            output, "Email deleted: <deleted@test>",
+            "delete_email human output should surface the deleted message id"
+        );
+    }
+
+    #[test]
     fn test_human_output_search_emails_empty() {
         let output = format_human_output("search_emails", "[]");
         assert_eq!(output, "No results found.");
@@ -8230,17 +8330,45 @@ mod tests {
 
     #[test]
     fn test_help_output_contains_all_commands() {
-        assert!(CLI_HELP_TEXT.contains("send-email"));
-        assert!(CLI_HELP_TEXT.contains("get-emails"));
-        assert!(CLI_HELP_TEXT.contains("get-email"));
-        assert!(CLI_HELP_TEXT.contains("search-emails"));
-        assert!(CLI_HELP_TEXT.contains("get-attachment"));
-        assert!(CLI_HELP_TEXT.contains("send-reply"));
-        assert!(CLI_HELP_TEXT.contains("forward-email"));
-        assert!(CLI_HELP_TEXT.contains("whoami"));
-        assert!(CLI_HELP_TEXT.contains("proxy"));
-        assert!(CLI_HELP_TEXT.contains("login"));
-        assert!(CLI_HELP_TEXT.contains("help"));
+        assert!(
+            CLI_HELP_TEXT.contains("send-email"),
+            "help should include send-email"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("get-emails"),
+            "help should include get-emails"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("get-email"),
+            "help should include get-email"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("delete-email"),
+            "CLI help text should include the delete-email command"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("search-emails"),
+            "help should include search-emails"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("get-attachment"),
+            "help should include get-attachment"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("send-reply"),
+            "help should include send-reply"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("forward-email"),
+            "help should include forward-email"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("whoami"),
+            "help should include whoami"
+        );
+        assert!(CLI_HELP_TEXT.contains("proxy"), "help should include proxy");
+        assert!(CLI_HELP_TEXT.contains("login"), "help should include login");
+        assert!(CLI_HELP_TEXT.contains("help"), "help should include help");
     }
 
     #[test]
