@@ -188,6 +188,13 @@ inboxapi get-emails --limit 5 --human
 inboxapi get-email "<message-id>"
 ```
 
+### `delete-email`
+
+```bash
+inboxapi delete-email "<message-id>"
+inboxapi delete-email "<message-id>" --force
+```
+
 ### `search-emails`
 
 ```bash

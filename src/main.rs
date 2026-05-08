@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -149,6 +149,14 @@ enum Commands {
     GetEmail {
         /// The message ID to retrieve
         message_id: String,
+    },
+    /// Soft-delete a received email by message ID
+    DeleteEmail {
+        /// The message ID to delete
+        message_id: String,
+        /// Skip the destructive confirmation prompt
+        #[arg(long)]
+        force: bool,
     },
     /// Search emails by sender, subject, or date range
     SearchEmails {
@@ -543,6 +551,23 @@ fn prompt_line(prompt: &str) -> Result<String> {
         .read_line(&mut input)
         .context("Failed to read input")?;
     Ok(input.trim().to_string())
+}
+
+fn confirm_delete_email(force: bool, message_id: &str) -> Result<bool> {
+    if force {
+        return Ok(true);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "Refusing to delete email non-interactively without --force"
+        ));
+    }
+
+    Ok(prompt_yes_no(&format!(
+        "WARNING: This will hide {} from your inbox. Continue? [y/N] ",
+        message_id
+    )))
 }
 
 fn reset_credentials() -> Result<()> {
@@ -1398,6 +1423,7 @@ async fn main() -> Result<()> {
         Some(Commands::SendEmail { .. })
         | Some(Commands::GetEmails { .. })
         | Some(Commands::GetEmail { .. })
+        | Some(Commands::DeleteEmail { .. })
         | Some(Commands::SearchEmails { .. })
         | Some(Commands::GetAttachment { .. })
         | Some(Commands::SendReply { .. })
@@ -2097,6 +2123,17 @@ fn format_human_output(tool_name: &str, text: &str) -> String {
                 text.to_string()
             }
         }
+        "delete_email" => {
+            if let Ok(data) = serde_json::from_str::<Value>(text) {
+                let msg_id = data["message_id"]
+                    .as_str()
+                    .or_else(|| data["messageId"].as_str())
+                    .unwrap_or("unknown");
+                format!("Email deleted: {}", msg_id)
+            } else {
+                format!("Email deleted.\n{}", text)
+            }
+        }
         "send_reply" => {
             if let Ok(data) = serde_json::from_str::<Value>(text) {
                 let msg_id = data["message_id"]
@@ -2303,6 +2340,7 @@ Commands:
   send-email     Send an email (supports --attachment and --attachment-ref)
   get-emails     List inbox emails
   get-email      Get a single email by message ID
+  delete-email   Soft-delete a received email by message ID
   get-last-email  Get the most recent email
   get-email-count  Get inbox email count
   get-sent-emails  List sent emails
@@ -2337,6 +2375,7 @@ Examples:
   inboxapi send-email --to user@example.com --subject \"Fwd\" --body \"See attached\" --attachment-ref 9f0206bb-...
   inboxapi get-emails --limit 5
   inboxapi get-emails --limit 5 --human
+  inboxapi delete-email \"<msg-id>\" --force
   inboxapi get-last-email
   inboxapi get-email-count
   inboxapi get-sent-emails --limit 10
@@ -2468,6 +2507,20 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
                 call_mcp_tool(&endpoint, &mut creds, &http_client, "get_email", args).await?;
             let text = extract_tool_result_text(&response)?;
             print_result("get_email", &text, cli.human);
+        }
+        Some(Commands::DeleteEmail {
+            ref message_id,
+            force,
+        }) => {
+            if !confirm_delete_email(force, message_id)? {
+                println!("Aborted.");
+                return Ok(());
+            }
+            let args = json!({"message_id": message_id});
+            let response =
+                call_mcp_tool(&endpoint, &mut creds, &http_client, "delete_email", args).await?;
+            let text = extract_tool_result_text(&response)?;
+            print_result("delete_email", &text, cli.human);
         }
         Some(Commands::SearchEmails {
             ref sender,
@@ -7651,6 +7704,16 @@ mod tests {
         assert!(err.to_string().contains("--body-file"));
     }
 
+    #[test]
+    fn test_delete_email_parses_positional_message_id() {
+        let cli = Cli::try_parse_from(["inboxapi", "delete-email", "<msg-id>", "--force"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::DeleteEmail { message_id, force: true }) if message_id == "<msg-id>"
+        ));
+    }
+
     // --- guess_content_type tests ---
 
     #[test]
@@ -8031,6 +8094,13 @@ mod tests {
     }
 
     #[test]
+    fn test_human_output_delete_email() {
+        let text = r#"{"success": true, "message_id": "<deleted@test>"}"#;
+        let output = format_human_output("delete_email", text);
+        assert_eq!(output, "Email deleted: <deleted@test>");
+    }
+
+    #[test]
     fn test_human_output_search_emails_empty() {
         let output = format_human_output("search_emails", "[]");
         assert_eq!(output, "No results found.");
@@ -8233,6 +8303,7 @@ mod tests {
         assert!(CLI_HELP_TEXT.contains("send-email"));
         assert!(CLI_HELP_TEXT.contains("get-emails"));
         assert!(CLI_HELP_TEXT.contains("get-email"));
+        assert!(CLI_HELP_TEXT.contains("delete-email"));
         assert!(CLI_HELP_TEXT.contains("search-emails"));
         assert!(CLI_HELP_TEXT.contains("get-attachment"));
         assert!(CLI_HELP_TEXT.contains("send-reply"));
