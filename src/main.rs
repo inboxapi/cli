@@ -1707,51 +1707,70 @@ async fn verify_send_reply_delivery(
     };
 
     const SEND_REPLY_VERIFY_ATTEMPTS: usize = 6;
+    let mut last_verify_error: Option<anyhow::Error> = None;
 
     for attempt in 0..SEND_REPLY_VERIFY_ATTEMPTS {
-        let response = call_mcp_tool(
+        match call_mcp_tool(
             endpoint,
             creds,
             http_client,
             "get_sent_emails",
             json!({"limit": 10}),
         )
-        .await?;
-        let sent_text = extract_tool_result_text(&response)?;
-        if let Ok(sent_items) = serde_json::from_str::<Value>(&sent_text) {
-            if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
-                if message_has_visible_body(message) {
-                    return Ok(());
-                }
-                if let Ok(email_response) = call_mcp_tool(
-                    endpoint,
-                    creds,
-                    http_client,
-                    "get_email",
-                    json!({"message_id": message_id, "content_format": "all"}),
-                )
-                .await
-                {
-                    if let Ok(email_text) = extract_tool_result_text(&email_response) {
-                        if let Ok(email) = serde_json::from_str::<Value>(&email_text) {
-                            if message_has_visible_body(&email) {
+        .await
+        {
+            Ok(response) => match extract_tool_result_text(&response) {
+                Ok(sent_text) => {
+                    if let Ok(sent_items) = serde_json::from_str::<Value>(&sent_text) {
+                        if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
+                            if message_has_visible_body(message) {
                                 return Ok(());
+                            }
+                            if let Ok(email_response) = call_mcp_tool(
+                                endpoint,
+                                creds,
+                                http_client,
+                                "get_email",
+                                json!({"message_id": message_id, "content_format": "all"}),
+                            )
+                            .await
+                            {
+                                if let Ok(email_text) = extract_tool_result_text(&email_response) {
+                                    if let Ok(email) = serde_json::from_str::<Value>(&email_text) {
+                                        if message_has_visible_body(&email) {
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                            }
+                            if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
+                                return Err(anyhow!(
+                                    "send-reply reported success, but sent message {} has an empty body",
+                                    message_id
+                                ));
                             }
                         }
                     }
                 }
-                if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
-                    return Err(anyhow!(
-                        "send-reply reported success, but sent message {} has an empty body",
-                        message_id
-                    ));
+                Err(err) => {
+                    last_verify_error = Some(err);
                 }
+            },
+            Err(err) => {
+                last_verify_error = Some(err);
             }
         }
 
         if attempt + 1 < SEND_REPLY_VERIFY_ATTEMPTS {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+    }
+
+    if let Some(err) = last_verify_error {
+        return Err(err.context(format!(
+            "send-reply verification could not confirm sent message {}",
+            message_id
+        )));
     }
 
     Ok(())
@@ -7032,7 +7051,11 @@ mod tests {
     #[test]
     fn test_extract_message_id_from_send_reply_result() {
         let text = r#"{"message_id":"<reply@test>","status":"queued"}"#;
-        assert_eq!(extract_message_id(text).as_deref(), Some("<reply@test>"));
+        assert_eq!(
+            extract_message_id(text).as_deref(),
+            Some("<reply@test>"),
+            "queued send_reply response should expose the generated reply message id"
+        );
     }
 
     #[test]
@@ -7041,8 +7064,12 @@ mod tests {
             {"message_id": "<one@test>", "body": "first"},
             {"message_id": "<two@test>", "body": "second"}
         ]);
-        let message = find_recent_sent_message(&sent_items, "<two@test>").unwrap();
-        assert_eq!(message["body"], "second");
+        let message = find_recent_sent_message(&sent_items, "<two@test>")
+            .expect("expected recent sent message lookup to match bare message_id");
+        assert_eq!(
+            message["body"], "second",
+            "sent message lookup should return the matching entry body"
+        );
     }
 
     #[test]
@@ -7055,22 +7082,40 @@ mod tests {
             ],
             "returned": 2
         });
-        let message = find_recent_sent_message(&sent_items, "<two@test>").unwrap();
-        assert_eq!(message["body"], "second");
+        let message = find_recent_sent_message(&sent_items, "<two@test>")
+            .expect("expected recent sent message lookup to unwrap sent_emails response shape");
+        assert_eq!(
+            message["body"], "second",
+            "sent message lookup should return wrapped sent_emails entry body"
+        );
     }
 
     #[test]
     fn test_message_has_visible_body_accepts_plain_or_html() {
-        assert!(message_has_visible_body(&json!({"body": "reply"})));
-        assert!(message_has_visible_body(&json!({"text_body": "reply"})));
-        assert!(message_has_visible_body(&json!({"textBody": "reply"})));
-        assert!(message_has_visible_body(
-            &json!({"html_body": "<p>reply</p>"})
-        ));
-        assert!(!message_has_visible_body(
-            &json!({"body": "", "html_body": ""})
-        ));
-        assert!(!message_has_visible_body(&json!({})));
+        assert!(
+            message_has_visible_body(&json!({"body": "reply"})),
+            "plain body should count as visible content"
+        );
+        assert!(
+            message_has_visible_body(&json!({"text_body": "reply"})),
+            "text_body should count as visible content"
+        );
+        assert!(
+            message_has_visible_body(&json!({"textBody": "reply"})),
+            "textBody should count as visible content"
+        );
+        assert!(
+            message_has_visible_body(&json!({"html_body": "<p>reply</p>"})),
+            "html_body should count as visible content"
+        );
+        assert!(
+            !message_has_visible_body(&json!({"body": "", "html_body": ""})),
+            "empty plain/html bodies should not count as visible content"
+        );
+        assert!(
+            !message_has_visible_body(&json!({})),
+            "missing body fields should not count as visible content"
+        );
     }
 
     #[test]
