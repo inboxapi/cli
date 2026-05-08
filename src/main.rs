@@ -1696,6 +1696,32 @@ fn find_recent_sent_message<'a>(sent_items: &'a Value, message_id: &str) -> Opti
     })
 }
 
+fn finalize_send_reply_verification(
+    message_id: &str,
+    saw_matching_message: bool,
+    last_verify_error: Option<anyhow::Error>,
+) -> Result<()> {
+    if saw_matching_message {
+        return Err(anyhow!(
+            "send-reply reported success, but sent message {} has an empty body",
+            message_id
+        ));
+    }
+
+    if let Some(err) = last_verify_error {
+        return Err(anyhow!(
+            "send-reply verification could not confirm sent message {}: {:#}",
+            message_id,
+            err
+        ));
+    }
+
+    Err(anyhow!(
+        "send-reply reported success, but sent message {} was not found in sent items after verification retries",
+        message_id
+    ))
+}
+
 async fn verify_send_reply_delivery(
     endpoint: &str,
     creds: &mut Option<Credentials>,
@@ -1708,6 +1734,7 @@ async fn verify_send_reply_delivery(
 
     const SEND_REPLY_VERIFY_ATTEMPTS: usize = 6;
     let mut last_verify_error: Option<anyhow::Error> = None;
+    let mut saw_matching_message = false;
 
     for attempt in 0..SEND_REPLY_VERIFY_ATTEMPTS {
         match call_mcp_tool(
@@ -1723,6 +1750,7 @@ async fn verify_send_reply_delivery(
                 Ok(sent_text) => {
                     if let Ok(sent_items) = serde_json::from_str::<Value>(&sent_text) {
                         if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
+                            saw_matching_message = true;
                             if message_has_visible_body(message) {
                                 return Ok(());
                             }
@@ -1744,10 +1772,11 @@ async fn verify_send_reply_delivery(
                                 }
                             }
                             if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
-                                return Err(anyhow!(
-                                    "send-reply reported success, but sent message {} has an empty body",
-                                    message_id
-                                ));
+                                return finalize_send_reply_verification(
+                                    &message_id,
+                                    saw_matching_message,
+                                    last_verify_error,
+                                );
                             }
                         }
                     }
@@ -1766,14 +1795,7 @@ async fn verify_send_reply_delivery(
         }
     }
 
-    if let Some(err) = last_verify_error {
-        return Err(err.context(format!(
-            "send-reply verification could not confirm sent message {}",
-            message_id
-        )));
-    }
-
-    Ok(())
+    finalize_send_reply_verification(&message_id, saw_matching_message, last_verify_error)
 }
 
 /// Split a comma-separated string into a Vec of trimmed strings.
@@ -7129,6 +7151,37 @@ mod tests {
         assert!(
             !message_has_visible_body(&json!({})),
             "missing body fields should not count as visible content"
+        );
+    }
+
+    #[test]
+    fn test_finalize_send_reply_verification_reports_missing_message() {
+        let err = finalize_send_reply_verification("<reply@test>", false, None)
+            .expect_err("missing sent message should fail verification");
+        assert!(
+            err.to_string()
+                .contains("was not found in sent items after verification retries"),
+            "missing sent message should explain that verification never found the reply"
+        );
+    }
+
+    #[test]
+    fn test_finalize_send_reply_verification_prefers_transport_error_before_missing_message() {
+        let err = finalize_send_reply_verification(
+            "<reply@test>",
+            false,
+            Some(anyhow!("temporary sent-items failure")),
+        )
+        .expect_err("transport failures should surface verification context");
+        let err_text = format!("{err:#}");
+        assert!(
+            err_text
+                .contains("send-reply verification could not confirm sent message <reply@test>"),
+            "verification errors should be wrapped with message-id context"
+        );
+        assert!(
+            err_text.contains("temporary sent-items failure"),
+            "wrapped verification error should preserve the original failure reason"
         );
     }
 
