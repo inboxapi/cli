@@ -86,6 +86,8 @@ inboxapi delete-email "<message-id>"
 inboxapi delete-email "<message-id>" --force
 ```
 
+The command prompts for confirmation by default. If stdin is not a TTY, you must pass `--force` or it will error instead of deleting.
+
 ---
 
 ## Credential Safety

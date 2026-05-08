@@ -195,6 +195,8 @@ inboxapi delete-email "<message-id>"
 inboxapi delete-email "<message-id>" --force
 ```
 
+The command prompts for confirmation by default. In non-interactive use, pass `--force` or the command will refuse to run.
+
 ### `search-emails`
 
 ```bash

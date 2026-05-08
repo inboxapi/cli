@@ -7708,10 +7708,13 @@ mod tests {
     fn test_delete_email_parses_positional_message_id() {
         let cli = Cli::try_parse_from(["inboxapi", "delete-email", "<msg-id>", "--force"]).unwrap();
 
-        assert!(matches!(
-            cli.command,
-            Some(Commands::DeleteEmail { message_id, force: true }) if message_id == "<msg-id>"
-        ));
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::DeleteEmail { message_id, force: true }) if message_id == "<msg-id>"
+            ),
+            "CLI arguments for delete-email should be parsed correctly"
+        );
     }
 
     // --- guess_content_type tests ---
@@ -8097,7 +8100,10 @@ mod tests {
     fn test_human_output_delete_email() {
         let text = r#"{"success": true, "message_id": "<deleted@test>"}"#;
         let output = format_human_output("delete_email", text);
-        assert_eq!(output, "Email deleted: <deleted@test>");
+        assert_eq!(
+            output, "Email deleted: <deleted@test>",
+            "delete_email human output should surface the deleted message id"
+        );
     }
 
     #[test]
@@ -8300,18 +8306,45 @@ mod tests {
 
     #[test]
     fn test_help_output_contains_all_commands() {
-        assert!(CLI_HELP_TEXT.contains("send-email"));
-        assert!(CLI_HELP_TEXT.contains("get-emails"));
-        assert!(CLI_HELP_TEXT.contains("get-email"));
-        assert!(CLI_HELP_TEXT.contains("delete-email"));
-        assert!(CLI_HELP_TEXT.contains("search-emails"));
-        assert!(CLI_HELP_TEXT.contains("get-attachment"));
-        assert!(CLI_HELP_TEXT.contains("send-reply"));
-        assert!(CLI_HELP_TEXT.contains("forward-email"));
-        assert!(CLI_HELP_TEXT.contains("whoami"));
-        assert!(CLI_HELP_TEXT.contains("proxy"));
-        assert!(CLI_HELP_TEXT.contains("login"));
-        assert!(CLI_HELP_TEXT.contains("help"));
+        assert!(
+            CLI_HELP_TEXT.contains("send-email"),
+            "help should include send-email"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("get-emails"),
+            "help should include get-emails"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("get-email"),
+            "help should include get-email"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("delete-email"),
+            "CLI help text should include the delete-email command"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("search-emails"),
+            "help should include search-emails"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("get-attachment"),
+            "help should include get-attachment"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("send-reply"),
+            "help should include send-reply"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("forward-email"),
+            "help should include forward-email"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("whoami"),
+            "help should include whoami"
+        );
+        assert!(CLI_HELP_TEXT.contains("proxy"), "help should include proxy");
+        assert!(CLI_HELP_TEXT.contains("login"), "help should include login");
+        assert!(CLI_HELP_TEXT.contains("help"), "help should include help");
     }
 
     #[test]
