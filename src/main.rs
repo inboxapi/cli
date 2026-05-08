@@ -5652,7 +5652,13 @@ mod tests {
         })]);
         let result = rewrite_tools_list(&body, None);
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        let tool = &parsed["result"]["tools"][0];
+        let tools = parsed["result"]["tools"]
+            .as_array()
+            .expect("rewritten tools list should be an array");
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "account_create")
+            .expect("account_create should remain present");
 
         assert_eq!(tool["description"], AUTH_TOOL_OVERRIDE);
         assert_eq!(tool["inputSchema"]["type"], "object");
