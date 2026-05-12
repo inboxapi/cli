@@ -1784,49 +1784,45 @@ async fn verify_send_reply_delivery(
         .await
         {
             Ok(response) => match extract_tool_result_text(&response) {
-                Ok(sent_text) => {
-                    match serde_json::from_str::<Value>(&sent_text) {
-                        Ok(sent_items) => {
-                            if let Some(message) = find_recent_sent_message(&sent_items, &message_id)
+                Ok(sent_text) => match serde_json::from_str::<Value>(&sent_text) {
+                    Ok(sent_items) => {
+                        if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
+                            saw_matching_message = true;
+                            if message_has_visible_body(message) {
+                                return Ok(());
+                            }
+                            if let Ok(email_response) = call_mcp_tool(
+                                endpoint,
+                                creds,
+                                http_client,
+                                "get_email",
+                                json!({"message_id": message_id, "content_format": "all"}),
+                            )
+                            .await
                             {
-                                saw_matching_message = true;
-                                if message_has_visible_body(message) {
-                                    return Ok(());
-                                }
-                                if let Ok(email_response) = call_mcp_tool(
-                                    endpoint,
-                                    creds,
-                                    http_client,
-                                    "get_email",
-                                    json!({"message_id": message_id, "content_format": "all"}),
-                                )
-                                .await
-                                {
-                                    if let Ok(email_text) = extract_tool_result_text(&email_response) {
-                                        if let Ok(email) = serde_json::from_str::<Value>(&email_text)
-                                        {
-                                            if message_has_visible_body(&email) {
-                                                return Ok(());
-                                            }
+                                if let Ok(email_text) = extract_tool_result_text(&email_response) {
+                                    if let Ok(email) = serde_json::from_str::<Value>(&email_text) {
+                                        if message_has_visible_body(&email) {
+                                            return Ok(());
                                         }
                                     }
                                 }
-                                if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
-                                    return finalize_send_reply_verification(
-                                        &message_id,
-                                        saw_matching_message,
-                                        last_verify_error,
-                                    );
-                                }
+                            }
+                            if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
+                                return finalize_send_reply_verification(
+                                    &message_id,
+                                    saw_matching_message,
+                                    last_verify_error,
+                                );
                             }
                         }
-                        Err(err) => {
-                            last_verify_error = Some(anyhow!(
+                    }
+                    Err(err) => {
+                        last_verify_error = Some(anyhow!(
                                 "get_sent_emails returned non-JSON payload during send-reply verification: {err}"
                             ));
-                        }
                     }
-                }
+                },
                 Err(err) => {
                     last_verify_error = Some(err);
                 }
