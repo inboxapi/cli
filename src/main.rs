@@ -1708,6 +1708,7 @@ async fn verify_send_reply_delivery(
 
     const SEND_REPLY_VERIFY_ATTEMPTS: usize = 6;
     let mut last_verify_error: Option<anyhow::Error> = None;
+    let mut message_observed = false;
 
     for attempt in 0..SEND_REPLY_VERIFY_ATTEMPTS {
         match call_mcp_tool(
@@ -1721,34 +1722,55 @@ async fn verify_send_reply_delivery(
         {
             Ok(response) => match extract_tool_result_text(&response) {
                 Ok(sent_text) => {
-                    if let Ok(sent_items) = serde_json::from_str::<Value>(&sent_text) {
-                        if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
-                            if message_has_visible_body(message) {
-                                return Ok(());
-                            }
-                            if let Ok(email_response) = call_mcp_tool(
-                                endpoint,
-                                creds,
-                                http_client,
-                                "get_email",
-                                json!({"message_id": message_id, "content_format": "all"}),
-                            )
-                            .await
-                            {
-                                if let Ok(email_text) = extract_tool_result_text(&email_response) {
-                                    if let Ok(email) = serde_json::from_str::<Value>(&email_text) {
-                                        if message_has_visible_body(&email) {
-                                            return Ok(());
+                    last_verify_error = None;
+                    match serde_json::from_str::<Value>(&sent_text) {
+                        Ok(sent_items) => {
+                            if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
+                                message_observed = true;
+                                if message_has_visible_body(message) {
+                                    return Ok(());
+                                }
+                                if let Ok(email_response) = call_mcp_tool(
+                                    endpoint,
+                                    creds,
+                                    http_client,
+                                    "get_email",
+                                    json!({"message_id": message_id, "content_format": "all"}),
+                                )
+                                .await
+                                {
+                                    if let Ok(email_text) = extract_tool_result_text(&email_response) {
+                                        match serde_json::from_str::<Value>(&email_text) {
+                                            Ok(email) => {
+                                                if message_has_visible_body(&email) {
+                                                    return Ok(());
+                                                }
+                                            }
+                                            Err(err) => {
+                                                eprintln!(
+                                                    "[inboxapi] Warning: send-reply verification could not parse get_email JSON for {}: {}",
+                                                    message_id, err
+                                                );
+                                            }
                                         }
                                     }
                                 }
+                                if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
+                                    return Err(anyhow!(
+                                        "send-reply reported success, but sent message {} has an empty body",
+                                        message_id
+                                    ));
+                                }
                             }
-                            if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
-                                return Err(anyhow!(
-                                    "send-reply reported success, but sent message {} has an empty body",
-                                    message_id
-                                ));
-                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[inboxapi] Warning: send-reply verification could not parse get_sent_emails JSON for {}: {}",
+                                message_id, err
+                            );
+                            last_verify_error = Some(anyhow!(err).context(
+                                "send-reply verification could not parse get_sent_emails response",
+                            ));
                         }
                     }
                 }
@@ -1773,7 +1795,17 @@ async fn verify_send_reply_delivery(
         )));
     }
 
-    Ok(())
+    if !message_observed {
+        return Err(anyhow!(
+            "send-reply verification could not confirm sent message {} in recent sent mail",
+            message_id
+        ));
+    }
+
+    Err(anyhow!(
+        "send-reply reported success, but sent message {} body could not be verified",
+        message_id
+    ))
 }
 
 /// Split a comma-separated string into a Vec of trimmed strings.
@@ -7028,12 +7060,32 @@ mod tests {
         );
         inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
-        assert_eq!(args["message_id"], "<fwd@test>");
-        assert_eq!(args["to"], json!(["x@y.com"]));
-        assert_eq!(args["cc"], json!(["cc@y.com"]));
-        assert!(args.get("from_name").is_none());
-        assert_eq!(args["note"], "FYI");
-        assert_eq!(args["token"], "tok");
+        assert_eq!(
+            args["message_id"], "<fwd@test>",
+            "forward_email should preserve the source message id"
+        );
+        assert_eq!(
+            args["to"],
+            json!(["x@y.com"]),
+            "forward_email should preserve primary recipients"
+        );
+        assert_eq!(
+            args["cc"],
+            json!(["cc@y.com"]),
+            "forward_email should preserve cc recipients"
+        );
+        assert!(
+            args.get("from_name").is_none(),
+            "forward_email should strip from_name to preserve enforced sender identity"
+        );
+        assert_eq!(
+            args["note"], "FYI",
+            "forward_email should preserve note content"
+        );
+        assert_eq!(
+            args["token"], "tok",
+            "forward_email should inject account token"
+        );
     }
 
     #[test]
@@ -7051,15 +7103,40 @@ mod tests {
         );
         inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
-        assert_eq!(args["in_reply_to"], "<msg@test>");
-        assert_eq!(args["body"], "See attached");
+        assert_eq!(
+            args["in_reply_to"], "<msg@test>",
+            "send_reply should preserve in_reply_to message id"
+        );
+        assert_eq!(
+            args["body"], "See attached",
+            "send_reply should preserve reply body content"
+        );
         let attachments = args["attachments"].as_array().unwrap();
-        assert_eq!(attachments.len(), 2);
-        assert_eq!(attachments[0]["filename"], "report.pdf");
-        assert_eq!(attachments[0]["content_type"], "application/pdf");
-        assert_eq!(attachments[1]["filename"], "photo.jpg");
-        assert_eq!(attachments[1]["content_type"], "image/jpeg");
-        assert_eq!(args["token"], "tok");
+        assert_eq!(
+            attachments.len(),
+            2,
+            "send_reply should preserve both attachment entries"
+        );
+        assert_eq!(
+            attachments[0]["filename"], "report.pdf",
+            "send_reply should preserve first attachment filename"
+        );
+        assert_eq!(
+            attachments[0]["content_type"], "application/pdf",
+            "send_reply should preserve first attachment content type"
+        );
+        assert_eq!(
+            attachments[1]["filename"], "photo.jpg",
+            "send_reply should preserve second attachment filename"
+        );
+        assert_eq!(
+            attachments[1]["content_type"], "image/jpeg",
+            "send_reply should preserve second attachment content type"
+        );
+        assert_eq!(
+            args["token"], "tok",
+            "send_reply should inject account token"
+        );
     }
 
     #[test]
@@ -7147,14 +7224,37 @@ mod tests {
         );
         inject_token(&mut msg, &make_creds("tok"));
         let args = msg["params"]["arguments"].as_object().unwrap();
-        assert_eq!(args["message_id"], "<fwd@test>");
-        assert_eq!(args["to"], json!(["x@y.com"]));
-        assert_eq!(args["note"], "FYI");
+        assert_eq!(
+            args["message_id"], "<fwd@test>",
+            "forward_email should preserve source message id when attachments are present"
+        );
+        assert_eq!(
+            args["to"],
+            json!(["x@y.com"]),
+            "forward_email should preserve recipients when attachments are present"
+        );
+        assert_eq!(
+            args["note"], "FYI",
+            "forward_email should preserve note when attachments are present"
+        );
         let attachments = args["attachments"].as_array().unwrap();
-        assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0]["filename"], "doc.pdf");
-        assert_eq!(attachments[0]["content_type"], "application/pdf");
-        assert_eq!(args["token"], "tok");
+        assert_eq!(
+            attachments.len(),
+            1,
+            "forward_email should preserve attachment count"
+        );
+        assert_eq!(
+            attachments[0]["filename"], "doc.pdf",
+            "forward_email should preserve attachment filename"
+        );
+        assert_eq!(
+            attachments[0]["content_type"], "application/pdf",
+            "forward_email should preserve attachment content type"
+        );
+        assert_eq!(
+            args["token"], "tok",
+            "forward_email should inject account token"
+        );
     }
 
     // --- edge cases ---
