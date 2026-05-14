@@ -1771,13 +1771,6 @@ async fn verify_send_reply_delivery(
                                     }
                                 }
                             }
-                            if attempt + 1 == SEND_REPLY_VERIFY_ATTEMPTS {
-                                return finalize_send_reply_verification(
-                                    &message_id,
-                                    saw_matching_message,
-                                    last_verify_error,
-                                );
-                            }
                         }
                     }
                     Err(err) => {
