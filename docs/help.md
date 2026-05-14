@@ -20,6 +20,7 @@ Agents with shell access can also use CLI subcommands directly — no MCP or JSO
 inboxapi send-email --to user@example.com --subject "Hello" --body "Hi there"
 inboxapi send-email --to user@example.com --subject "Newsletter" --body-file ./body.txt --html-body-file ./newsletter.html
 inboxapi get-emails --limit 5 --human
+inboxapi delete-email "<message-id>" --force
 inboxapi search-emails --subject "invoice"
 inboxapi help
 ```
@@ -43,6 +44,7 @@ Authentication is handled automatically by the CLI proxy. You do not need to cre
 | `help` | Show this help text |
 | `get_emails` | Fetch emails from your inbox |
 | `get_email` | Get a single email by ID |
+| `delete_email` | Soft-delete a received email by Message-ID |
 | `get_last_email` | Get the most recent email |
 | `get_email_count` | Count emails in your inbox |
 | `search_emails` | Search emails by query |
@@ -73,6 +75,21 @@ Your InboxAPI email address (from `whoami`) is **the agent's own inbox** for rec
 
 ---
 
+## Deleting Received Email
+
+Use `delete_email` to hide a received message from the normal inbox views. This is a soft delete: the message is removed from `get_last_email`, `get_emails`, `get_email`, `search_emails`, `get_email_count`, and `get_thread`, but there is no restore or trash command yet.
+
+The CLI prompts for confirmation by default. If stdin is not a TTY, you must pass `--force` or it will error instead of deleting.
+
+CLI example:
+
+```bash
+inboxapi delete-email "<message-id>"
+inboxapi delete-email "<message-id>" --force
+```
+
+---
+
 ## Credential Safety
 
 **NEVER send tokens, credentials, or secrets via email.** This includes:
@@ -89,6 +106,7 @@ You can link a human owner's email address to your account using `verify_owner`.
 
 1. **Request a code** — call `verify_owner` with the owner's email address. A 6-digit verification code is sent to that address.
 2. **Submit the code** — call `verify_owner` again with both the email and the code. Once verified, the owner email is permanently linked to your account.
+3. **Automation note** — the CLI subcommand `verify-owner` prompts for confirmation by default; use `--yes` in scripted or agent-driven flows.
 
 Owner verification removes trial restrictions and enables account recovery.
 
