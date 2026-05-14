@@ -1676,7 +1676,7 @@ fn message_has_visible_body(message: &Value) -> bool {
         .as_str()
         .or_else(|| message["htmlBody"].as_str())
         .unwrap_or_default();
-    !body.is_empty() || !html_body.is_empty()
+    !body.trim().is_empty() || !html_body.trim().is_empty()
 }
 
 fn sent_email_items(sent_items: &Value) -> Option<&Vec<Value>> {
@@ -7152,6 +7152,10 @@ mod tests {
         assert!(
             !message_has_visible_body(&json!({"body": "", "html_body": ""})),
             "empty plain/html bodies should not count as visible content"
+        );
+        assert!(
+            !message_has_visible_body(&json!({"body": "   ", "html_body": "\n\t"})),
+            "whitespace-only bodies should not count as visible content"
         );
         assert!(
             !message_has_visible_body(&json!({})),
