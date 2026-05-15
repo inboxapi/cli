@@ -4576,6 +4576,20 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
 
                 // Strip `token` and `encryption_secret` from every tool's inputSchema
                 if let Some(schema) = tool.get_mut("inputSchema").and_then(|s| s.as_object_mut()) {
+                    // Normalize no-arg object schemas so OpenAI-style function conversion
+                    // always gets an explicit `properties` object.
+                    if schema.get("type").and_then(|t| t.as_str()) == Some("object") {
+                        schema
+                            .entry("properties".to_string())
+                            .or_insert_with(|| json!({}));
+                        schema
+                            .entry("required".to_string())
+                            .or_insert_with(|| json!([]));
+                        schema
+                            .entry("additionalProperties".to_string())
+                            .or_insert_with(|| json!(false));
+                    }
+
                     // Add proxy-only confirmation flags / validation hints
                     if let Some(ref name) = tool_name {
                         if name == "forward_email" {
@@ -7542,6 +7556,71 @@ mod tests {
         assert_eq!(
             tool["inputSchema"]["properties"]["message_id"]["maxLength"],
             5000
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tools_list_normalizes_no_arg_schema() {
+        let body = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [{
+                    "name": "help",
+                    "description": "Help",
+                    "inputSchema": {"type": "object"}
+                }]
+            }
+        }))
+        .unwrap();
+
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let input = &parsed["result"]["tools"][0]["inputSchema"];
+        assert_eq!(
+            input["type"], "object",
+            "inputSchema type should remain object"
+        );
+        assert_eq!(
+            input["properties"],
+            json!({}),
+            "no-arg object schema should gain empty properties"
+        );
+        assert_eq!(
+            input["required"],
+            json!([]),
+            "no-arg object schema should gain empty required array"
+        );
+        assert_eq!(
+            input["additionalProperties"], false,
+            "no-arg object schema should default additionalProperties to false"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tools_list_keeps_existing_additional_properties() {
+        let body = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [{
+                    "name": "help",
+                    "description": "Help",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": true
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["result"]["tools"][0]["inputSchema"]["additionalProperties"], true,
+            "existing additionalProperties value should be preserved"
         );
     }
 
