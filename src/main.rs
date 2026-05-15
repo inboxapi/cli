@@ -1773,8 +1773,8 @@ async fn verify_send_reply_delivery(
     let mut last_verify_error: Option<anyhow::Error> = None;
     let mut saw_matching_message = false;
 
-    for attempt in 0..SEND_REPLY_VERIFY_ATTEMPTS {
-        match call_mcp_tool(
+    for attempt in 1..=SEND_REPLY_VERIFY_ATTEMPTS {
+        let sent_response = match call_mcp_tool(
             endpoint,
             creds,
             http_client,
@@ -1783,49 +1783,66 @@ async fn verify_send_reply_delivery(
         )
         .await
         {
-            Ok(response) => match extract_tool_result_text(&response) {
-                Ok(sent_text) => match serde_json::from_str::<Value>(&sent_text) {
-                    Ok(sent_items) => {
-                        if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
-                            saw_matching_message = true;
-                            if message_has_visible_body(message) {
-                                return Ok(());
-                            }
-                            if let Ok(email_response) = call_mcp_tool(
-                                endpoint,
-                                creds,
-                                http_client,
-                                "get_email",
-                                json!({"message_id": message_id, "content_format": "all"}),
-                            )
-                            .await
-                            {
-                                if let Ok(email_text) = extract_tool_result_text(&email_response) {
-                                    if let Ok(email) = serde_json::from_str::<Value>(&email_text) {
-                                        if message_has_visible_body(&email) {
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        last_verify_error = Some(anyhow!(
-                                "get_sent_emails returned non-JSON payload during send-reply verification: {err}"
-                            ));
-                    }
-                },
-                Err(err) => {
-                    last_verify_error = Some(err);
-                }
-            },
+            Ok(response) => response,
             Err(err) => {
                 last_verify_error = Some(err);
+                if attempt < SEND_REPLY_VERIFY_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                continue;
+            }
+        };
+
+        let sent_text = match extract_tool_result_text(&sent_response) {
+            Ok(text) => text,
+            Err(err) => {
+                last_verify_error = Some(err);
+                if attempt < SEND_REPLY_VERIFY_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                continue;
+            }
+        };
+
+        let sent_items = match serde_json::from_str::<Value>(&sent_text) {
+            Ok(value) => value,
+            Err(err) => {
+                last_verify_error = Some(anyhow!(
+                    "get_sent_emails returned non-JSON payload during send-reply verification: {err}"
+                ));
+                if attempt < SEND_REPLY_VERIFY_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                continue;
+            }
+        };
+
+        if let Some(message) = find_recent_sent_message(&sent_items, &message_id) {
+            saw_matching_message = true;
+            if message_has_visible_body(message) {
+                return Ok(());
+            }
+
+            if let Ok(email_response) = call_mcp_tool(
+                endpoint,
+                creds,
+                http_client,
+                "get_email",
+                json!({"message_id": message_id, "content_format": "all"}),
+            )
+            .await
+            {
+                if let Ok(email_text) = extract_tool_result_text(&email_response) {
+                    if let Ok(email) = serde_json::from_str::<Value>(&email_text) {
+                        if message_has_visible_body(&email) {
+                            return Ok(());
+                        }
+                    }
+                }
             }
         }
 
-        if attempt + 1 < SEND_REPLY_VERIFY_ATTEMPTS {
+        if attempt < SEND_REPLY_VERIFY_ATTEMPTS {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
