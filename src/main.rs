@@ -7563,10 +7563,24 @@ mod tests {
         let result = rewrite_tools_list(&body, None);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         let input = &parsed["result"]["tools"][0]["inputSchema"];
-        assert_eq!(input["type"], "object");
-        assert_eq!(input["properties"], json!({}));
-        assert_eq!(input["required"], json!([]));
-        assert_eq!(input["additionalProperties"], false);
+        assert_eq!(
+            input["type"], "object",
+            "inputSchema type should remain object"
+        );
+        assert_eq!(
+            input["properties"],
+            json!({}),
+            "no-arg object schema should gain empty properties"
+        );
+        assert_eq!(
+            input["required"],
+            json!([]),
+            "no-arg object schema should gain empty required array"
+        );
+        assert_eq!(
+            input["additionalProperties"], false,
+            "no-arg object schema should default additionalProperties to false"
+        );
     }
 
     #[test]
@@ -7591,8 +7605,8 @@ mod tests {
         let result = rewrite_tools_list(&body, None);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(
-            parsed["result"]["tools"][0]["inputSchema"]["additionalProperties"],
-            true
+            parsed["result"]["tools"][0]["inputSchema"]["additionalProperties"], true,
+            "existing additionalProperties value should be preserved"
         );
     }
 
