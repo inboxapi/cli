@@ -5,6 +5,7 @@ use reqwest::{
     Client as HttpClient,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::map::Entry;
 use serde_json::{json, Value};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -4579,17 +4580,22 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
                     // Normalize no-arg object schemas so OpenAI-style function conversion
                     // always gets an explicit `properties` object.
                     if schema.get("type").and_then(|t| t.as_str()) == Some("object") {
-                        let had_properties = schema.get("properties").is_some();
-                        schema
-                            .entry("properties".to_string())
-                            .or_insert_with(|| json!({}));
-                        schema
-                            .entry("required".to_string())
-                            .or_insert_with(|| json!([]));
+                        let had_properties = match schema.entry("properties".to_string()) {
+                            Entry::Occupied(_) => true,
+                            Entry::Vacant(v) => {
+                                v.insert(json!({}));
+                                false
+                            }
+                        };
+                        if let Entry::Vacant(v) = schema.entry("required".to_string()) {
+                            v.insert(json!([]));
+                        }
                         if !had_properties {
-                            schema
-                                .entry("additionalProperties".to_string())
-                                .or_insert_with(|| json!(false));
+                            if let Entry::Vacant(v) =
+                                schema.entry("additionalProperties".to_string())
+                            {
+                                v.insert(json!(false));
+                            }
                         }
                     }
 
