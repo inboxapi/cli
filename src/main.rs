@@ -4579,15 +4579,18 @@ fn rewrite_tools_list(body: &str, creds: Option<&Credentials>) -> String {
                     // Normalize no-arg object schemas so OpenAI-style function conversion
                     // always gets an explicit `properties` object.
                     if schema.get("type").and_then(|t| t.as_str()) == Some("object") {
+                        let had_properties = schema.get("properties").is_some();
                         schema
                             .entry("properties".to_string())
                             .or_insert_with(|| json!({}));
                         schema
                             .entry("required".to_string())
                             .or_insert_with(|| json!([]));
-                        schema
-                            .entry("additionalProperties".to_string())
-                            .or_insert_with(|| json!(false));
+                        if !had_properties {
+                            schema
+                                .entry("additionalProperties".to_string())
+                                .or_insert_with(|| json!(false));
+                        }
                     }
 
                     // Add proxy-only confirmation flags / validation hints
@@ -7621,6 +7624,35 @@ mod tests {
         assert_eq!(
             parsed["result"]["tools"][0]["inputSchema"]["additionalProperties"], true,
             "existing additionalProperties value should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tools_list_does_not_force_additional_properties_on_arg_schema() {
+        let body = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [{
+                    "name": "help",
+                    "description": "Help",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}}
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let result = rewrite_tools_list(&body, None);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let schema = parsed["result"]["tools"][0]["inputSchema"]
+            .as_object()
+            .expect("inputSchema must be object");
+        assert!(
+            !schema.contains_key("additionalProperties"),
+            "arg schema should keep JSON Schema default additionalProperties behavior"
         );
     }
 
