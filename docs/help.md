@@ -21,6 +21,7 @@ inboxapi send-email --to user@example.com --subject "Hello" --body "Hi there"
 inboxapi send-email --to user@example.com --subject "Newsletter" --body-file ./body.txt --html-body-file ./newsletter.html
 inboxapi get-emails --limit 5 --human
 inboxapi delete-email "<message-id>" --force
+inboxapi archive-email "<message-id>" --force
 inboxapi search-emails --subject "invoice"
 inboxapi help
 ```
@@ -78,6 +79,7 @@ Your InboxAPI email address (from `whoami`) is **the agent's own inbox** for rec
 ## Deleting Received Email
 
 Use `delete_email` to hide a received message from the normal inbox views. This is a soft delete: the message is removed from `get_last_email`, `get_emails`, `get_email`, `search_emails`, `get_email_count`, and `get_thread`, but there is no restore or trash command yet.
+For CLI usage, `archive-email` is an alias for `delete-email`.
 
 The CLI prompts for confirmation by default. If stdin is not a TTY, you must pass `--force` or it will error instead of deleting.
 
@@ -86,6 +88,7 @@ CLI example:
 ```bash
 inboxapi delete-email "<message-id>"
 inboxapi delete-email "<message-id>" --force
+inboxapi archive-email "<message-id>" --force
 ```
 
 ---

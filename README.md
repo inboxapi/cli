@@ -190,11 +190,13 @@ inboxapi get-email "<message-id>"
 
 ### `delete-email`
 
-Soft-deletes a received email by message ID. It prompts for confirmation by default, and scripted or piped use must pass `--force`.
+Archives (soft-deletes) a received email by message ID. It prompts for confirmation by default, and scripted or piped use must pass `--force`.
+`archive-email` is available as an alias for `delete-email`.
 
 ```bash
 inboxapi delete-email "<message-id>"
 inboxapi delete-email "<message-id>" --force
+inboxapi archive-email "<message-id>" --force
 ```
 
 ### `search-emails`
