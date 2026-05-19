@@ -2514,7 +2514,7 @@ Commands:
   send-email     Send an email (supports --attachment and --attachment-ref)
   get-emails     List inbox emails
   get-email      Get a single email by message ID
-  delete-email   Soft-delete a received email by message ID (alias: archive-email)
+  delete-email   Archive (soft-delete) a received email by message ID (alias: archive-email)
   get-last-email  Get the most recent email
   get-email-count  Get inbox email count
   get-sent-emails  List sent emails
