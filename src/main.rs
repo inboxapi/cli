@@ -8133,7 +8133,8 @@ mod tests {
 
     #[test]
     fn test_archive_email_alias_parses_positional_message_id() {
-        let cli = Cli::try_parse_from(["inboxapi", "archive-email", "<msg-id>", "--force"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["inboxapi", "archive-email", "<msg-id>", "--force"]).unwrap();
 
         assert!(
             matches!(
