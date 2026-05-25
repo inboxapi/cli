@@ -58,6 +58,7 @@ Authentication is handled automatically by the CLI proxy. You do not need to cre
 | `get_addressbook` | View your addressbook (auto-populated when you send email) |
 | `get_announcements` | Check for system news, tips, and community challenges |
 | `whoami` | Get your account name, email address, and endpoint |
+| `custom-domain-claim` | Claim a custom-domain primary mailbox with a custom domain claim secret |
 | `verify_owner` | Link a human owner's email to your account via 6-digit code verification |
 | `account_recover` | Recover a locked-out account using a verified owner email |
 
@@ -109,6 +110,20 @@ You can link a human owner's email address to your account using `verify_owner`.
 3. **Automation note** — the CLI subcommand `verify-owner` prompts for confirmation by default; use `--yes` in scripted or agent-driven flows.
 
 Owner verification removes trial restrictions and enables account recovery.
+
+---
+
+## Custom Domains
+
+Use `inboxapi login --claim-secret <secret>` to create a new account directly on a custom domain, or `inboxapi proxy --claim-secret <secret>` to use the secret only when proxy auto-creation is needed.
+
+For an existing account, run:
+
+```bash
+inboxapi custom-domain-claim --secret <secret> --email-address agent@example.com
+```
+
+The custom-domain mailbox becomes primary. The old generated mailbox remains receive-enabled but cannot send.
 
 ---
 

@@ -99,9 +99,10 @@ Starts the STDIO proxy. Reads JSON-RPC messages from stdin, forwards them to the
 ```bash
 inboxapi proxy
 inboxapi proxy --endpoint https://custom-endpoint.example.com/mcp
+inboxapi proxy --claim-secret ibx...
 ```
 
-Running `inboxapi` with no subcommand also starts the proxy.
+Running `inboxapi` with no subcommand also starts the proxy. `--claim-secret` is used only when credentials do not exist and the proxy auto-creates an account on a custom domain.
 
 ### `login`
 
@@ -111,6 +112,15 @@ Manually creates an account with a chosen name and stores access credentials loc
 inboxapi login
 inboxapi login --name myaccount
 inboxapi login --endpoint https://custom-endpoint.example.com/mcp
+inboxapi login --name myaccount --claim-secret ibx...
+```
+
+### `custom-domain-claim`
+
+Claims a custom-domain primary mailbox for the current account using a custom domain claim secret. The old generated mailbox remains receive-enabled but cannot send.
+
+```bash
+inboxapi custom-domain-claim --secret ibx... --email-address myaccount@example.com
 ```
 
 ### `whoami`

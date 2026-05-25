@@ -46,6 +46,9 @@ enum Commands {
     Proxy {
         #[arg(long, default_value = "https://mcp.inboxapi.ai/mcp")]
         endpoint: String,
+        /// Custom domain claim secret used only when auto-creating credentials
+        #[arg(long = "claim-secret")]
+        claim_secret: Option<String>,
     },
     /// Log in and create credentials
     Login {
@@ -53,6 +56,18 @@ enum Commands {
         name: Option<String>,
         #[arg(long, default_value = "https://mcp.inboxapi.ai/mcp")]
         endpoint: String,
+        /// Custom domain claim secret used during account creation
+        #[arg(long = "claim-secret")]
+        claim_secret: Option<String>,
+    },
+    /// Claim a custom-domain primary mailbox for the current account
+    CustomDomainClaim {
+        /// Custom domain claim secret
+        #[arg(long = "secret")]
+        secret: String,
+        /// Full custom-domain email address to claim
+        #[arg(long = "email-address")]
+        email_address: String,
     },
     /// Show current account info
     Whoami,
@@ -1387,7 +1402,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Login { name, endpoint }) => login_flow(name, endpoint).await,
+        Some(Commands::Login {
+            name,
+            endpoint,
+            claim_secret,
+        }) => login_flow(name, endpoint, claim_secret).await,
         Some(Commands::Whoami) => {
             let creds = load_credentials()?;
             println!("Logged in as: {}", creds.account_name);
@@ -1397,7 +1416,11 @@ async fn main() -> Result<()> {
             println!("Endpoint: {}", creds.endpoint);
             Ok(())
         }
-        Some(Commands::Proxy { endpoint }) => run_proxy(endpoint).await,
+        Some(Commands::Proxy {
+            endpoint,
+            claim_secret,
+        }) => run_proxy(endpoint, claim_secret).await,
+        Some(Commands::CustomDomainClaim { .. }) => run_cli_command(&cli).await,
         Some(Commands::Reset) => reset_credentials(),
         Some(Commands::Backup { folder }) => backup_credentials(&folder),
         Some(Commands::Restore { folder }) => restore_credentials(&folder),
@@ -1461,7 +1484,7 @@ async fn main() -> Result<()> {
                 Ok(creds) => creds.endpoint,
                 Err(_) => cli.endpoint,
             };
-            run_proxy(endpoint).await
+            run_proxy(endpoint, None).await
         }
     }
 }
@@ -2535,6 +2558,7 @@ Commands:
   whoami         Show current account info
   proxy          Start MCP STDIO proxy (default)
   login          Create account and store credentials
+  custom-domain-claim  Claim a custom-domain primary mailbox
   help           Show this help
 
 Global flags:
@@ -2559,6 +2583,9 @@ Examples:
   inboxapi send-reply --message-id \"<msg-id>\" --body \"Thanks!\"
   inboxapi send-reply --message-id \"<msg-id>\" --body-file ./reply.txt --html-body-file ./reply.html
   inboxapi forward-email --message-id \"<msg-id>\" --to recipient@example.com
+  inboxapi login --claim-secret ibx... --name my-agent
+  inboxapi proxy --claim-secret ibx...
+  inboxapi custom-domain-claim --secret ibx... --email-address agent@example.com
 ";
 
 /// Run a simple MCP tool call with no arguments, print the result.
@@ -2579,6 +2606,40 @@ async fn run_simple_command(
 async fn run_cli_command(cli: &Cli) -> Result<()> {
     let http_client = HttpClient::new();
 
+    if let Some(Commands::CustomDomainClaim {
+        secret,
+        email_address,
+    }) = &cli.command
+    {
+        let mut stored_creds = load_credentials()?;
+        let endpoint = stored_creds.endpoint.clone();
+        let mut creds = Some(stored_creds.clone());
+        let response = call_mcp_tool(
+            &endpoint,
+            &mut creds,
+            &http_client,
+            "custom_domain_claim",
+            json!({
+                "custom_domain_claim_secret": secret,
+                "email_address": email_address,
+            }),
+        )
+        .await?;
+        let text = extract_tool_result_text(&response)?;
+        let claim_data: Value = serde_json::from_str(&text)?;
+        if let Some(primary_email) = claim_data.get("primary_email").and_then(|v| v.as_str()) {
+            stored_creds.email = Some(primary_email.to_string());
+            if let Some(ref refreshed) = creds {
+                stored_creds.access_token = refreshed.access_token.clone();
+                stored_creds.refresh_token = refreshed.refresh_token.clone();
+                stored_creds.encryption_secret = refreshed.encryption_secret.clone();
+            }
+            save_credentials(&stored_creds)?;
+        }
+        print_result("custom_domain_claim", &text, cli.human);
+        return Ok(());
+    }
+
     // Load credentials, auto-creating account if missing
     let mut creds: Option<Credentials> = match load_credentials() {
         Ok(c) => Some(c),
@@ -2589,7 +2650,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
                 name
             );
             let endpoint = cli.endpoint.as_str();
-            match create_account_and_authenticate(&name, endpoint, &http_client).await {
+            match create_account_and_authenticate(&name, endpoint, &http_client, None).await {
                 Ok(c) => {
                     eprintln!("[inboxapi] Account created successfully.");
                     Some(c)
@@ -3089,7 +3150,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-async fn run_proxy(endpoint: String) -> Result<()> {
+async fn run_proxy(endpoint: String, claim_secret: Option<String>) -> Result<()> {
     let http_client = HttpClient::new();
 
     // Load credentials, auto-creating account if missing
@@ -3101,7 +3162,14 @@ async fn run_proxy(endpoint: String) -> Result<()> {
                 "[inboxapi] No credentials found. Auto-creating account '{}'...",
                 name
             );
-            match create_account_and_authenticate(&name, &endpoint, &http_client).await {
+            match create_account_and_authenticate(
+                &name,
+                &endpoint,
+                &http_client,
+                claim_secret.as_deref(),
+            )
+            .await
+            {
                 Ok(c) => {
                     eprintln!("[inboxapi] Account created successfully.");
                     Some(c)
@@ -3907,7 +3975,7 @@ async fn reauth_with_fallback(
                 e
             );
             let name = generate_agent_name();
-            create_account_and_authenticate(&name, endpoint, http_client).await
+            create_account_and_authenticate(&name, endpoint, http_client, None).await
         }
     }
 }
@@ -5049,11 +5117,20 @@ async fn create_account_and_authenticate(
     name: &str,
     endpoint: &str,
     http_client: &HttpClient,
+    claim_secret: Option<&str>,
 ) -> Result<Credentials> {
     eprintln!("[inboxapi] Generating hashcash for '{}'...", name);
     let hashcash = generate_hashcash(name, 20).await?;
 
     eprintln!("[inboxapi] Creating account...");
+    let mut account_arguments = json!({
+        "name": name,
+        "hashcash": hashcash
+    });
+    if let Some(secret) = claim_secret {
+        account_arguments["custom_domain_claim_secret"] = json!(secret);
+    }
+
     let resp = http_client
         .post(endpoint)
         .header(CONTENT_TYPE, "application/json")
@@ -5064,10 +5141,7 @@ async fn create_account_and_authenticate(
             "method": "tools/call",
             "params": {
                 "name": "account_create",
-                "arguments": {
-                    "name": name,
-                    "hashcash": hashcash
-                }
+                "arguments": account_arguments
             }
         }))
         .send()
@@ -5141,7 +5215,11 @@ async fn create_account_and_authenticate(
     Ok(creds)
 }
 
-async fn login_flow(name: Option<String>, endpoint: String) -> Result<()> {
+async fn login_flow(
+    name: Option<String>,
+    endpoint: String,
+    claim_secret: Option<String>,
+) -> Result<()> {
     let name = if let Some(n) = name {
         n
     } else {
@@ -5153,7 +5231,8 @@ async fn login_flow(name: Option<String>, endpoint: String) -> Result<()> {
     };
 
     let http_client = HttpClient::new();
-    create_account_and_authenticate(&name, &endpoint, &http_client).await?;
+    create_account_and_authenticate(&name, &endpoint, &http_client, claim_secret.as_deref())
+        .await?;
     println!("Logged in successfully!");
     Ok(())
 }
@@ -7413,7 +7492,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_no_domain_key() {
+    fn test_sanitize_without_domain_argument() {
         let mut msg = make_tools_call("get_emails", json!({"limit": 10}));
         sanitize_arguments(&mut msg);
         let args = msg["params"]["arguments"].as_object().unwrap();
