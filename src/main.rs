@@ -166,7 +166,8 @@ enum Commands {
         /// The message ID to retrieve
         message_id: String,
     },
-    /// Soft-delete a received email by message ID
+    /// Archive (soft-delete) a received email by message ID
+    #[command(visible_alias = "archive-email")]
     DeleteEmail {
         /// The message ID to delete
         message_id: String,
@@ -2536,7 +2537,7 @@ Commands:
   send-email     Send an email (supports --attachment and --attachment-ref)
   get-emails     List inbox emails
   get-email      Get a single email by message ID
-  delete-email   Soft-delete a received email by message ID
+  delete-email   Archive (soft-delete) a received email by message ID (alias: archive-email)
   get-last-email  Get the most recent email
   get-email-count  Get inbox email count
   get-sent-emails  List sent emails
@@ -2573,6 +2574,7 @@ Examples:
   inboxapi get-emails --limit 5
   inboxapi get-emails --limit 5 --human
   inboxapi delete-email \"<msg-id>\" --force
+  inboxapi archive-email \"<msg-id>\" --force
   inboxapi get-last-email
   inboxapi get-email-count
   inboxapi get-sent-emails --limit 10
@@ -8209,6 +8211,20 @@ mod tests {
     }
 
     #[test]
+    fn test_archive_email_alias_parses_positional_message_id() {
+        let cli =
+            Cli::try_parse_from(["inboxapi", "archive-email", "<msg-id>", "--force"]).unwrap();
+
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::DeleteEmail { message_id, force: true }) if message_id == "<msg-id>"
+            ),
+            "CLI arguments for archive-email alias should be parsed correctly"
+        );
+    }
+
+    #[test]
     fn test_delete_email_prompt_mode() {
         assert!(
             !delete_email_prompt_mode(true, false).expect("force should skip prompting"),
@@ -8908,6 +8924,10 @@ mod tests {
         assert!(
             CLI_HELP_TEXT.contains("delete-email"),
             "CLI help text should include the delete-email command"
+        );
+        assert!(
+            CLI_HELP_TEXT.contains("archive-email"),
+            "CLI help text should include the archive-email alias"
         );
         assert!(
             CLI_HELP_TEXT.contains("search-emails"),
