@@ -2613,7 +2613,16 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
         email_address,
     }) = &cli.command
     {
-        let mut stored_creds = load_credentials()?;
+        let mut stored_creds = match load_credentials() {
+            Ok(c) => c,
+            Err(_e) => {
+                eprintln!(
+                    "[inboxapi] Error: No credentials found. custom-domain-claim requires an authenticated account.\\n\\
+                     Please run 'inboxapi login' first, then retry.",
+                );
+                return Err(anyhow!("Not authenticated. Run 'inboxapi login' first."));
+            }
+        };
         let endpoint = stored_creds.endpoint.clone();
         let mut creds = Some(stored_creds.clone());
         let response = call_mcp_tool(
