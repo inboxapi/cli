@@ -2617,7 +2617,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
             Ok(c) => c,
             Err(_e) => {
                 eprintln!(
-                    "[inboxapi] Error: No credentials found. custom-domain-claim requires an authenticated account.\\n\\
+                    "[inboxapi] Error: No credentials found. custom-domain-claim requires an authenticated account.\n\
                      Please run 'inboxapi login' first, then retry.",
                 );
                 return Err(anyhow!("Not authenticated. Run 'inboxapi login' first."));
