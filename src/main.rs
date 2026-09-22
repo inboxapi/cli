@@ -4462,7 +4462,20 @@ const AUTH_TOOL_OVERRIDE: &str = "Handled automatically by the CLI proxy. Do not
 
 const EXPOSE_INTERNAL_TOOLS_ENV: &str = "INBOXAPI_EXPOSE_INTERNAL_TOOLS";
 
+/// Thread-local test override so tests never mutate the process environment.
+/// Rust runs tests in threads sharing one environment, where concurrent
+/// set_var/remove_var pairs race with each other and with plain env reads.
+#[cfg(test)]
+thread_local! {
+    static TEST_EXPOSE_INTERNAL_TOOLS: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn expose_internal_tools() -> bool {
+    #[cfg(test)]
+    if let Some(v) = TEST_EXPOSE_INTERNAL_TOOLS.get() {
+        return v;
+    }
     std::env::var(EXPOSE_INTERNAL_TOOLS_ENV)
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -5775,31 +5788,28 @@ mod tests {
 
     // --- rewrite_tools_list tests ---
 
+    // Flips the thread-local expose override instead of the process
+    // environment, so concurrent tests cannot observe each other's state.
     struct EnvVarGuard {
-        key: &'static str,
-        prev: Option<String>,
+        prev: Option<bool>,
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
+        fn set_test_expose(value: bool) -> Self {
+            let prev = TEST_EXPOSE_INTERNAL_TOOLS.get();
+            TEST_EXPOSE_INTERNAL_TOOLS.set(Some(value));
+            Self { prev }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            if let Some(ref v) = self.prev {
-                std::env::set_var(self.key, v);
-            } else {
-                std::env::remove_var(self.key);
-            }
+            TEST_EXPOSE_INTERNAL_TOOLS.set(self.prev);
         }
     }
 
     fn expose_internal_tools_for_test() -> EnvVarGuard {
-        EnvVarGuard::set(EXPOSE_INTERNAL_TOOLS_ENV, "1")
+        EnvVarGuard::set_test_expose(true)
     }
 
     fn make_tools_list_response(tools: Vec<Value>) -> String {

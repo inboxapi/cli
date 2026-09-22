@@ -114,13 +114,20 @@ jobs:
     name: Publish npm packages
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: read # for checkout
+      id-token: write # for npm trusted publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          # Node 20 ships npm 10.x; trusted publishing requires npm >= 11.5.1
+          node-version: '22'
+
+      - name: Ensure npm supports staged publishing
+        # `npm stage` requires npm >= 11.15.0; pin the 11 line explicitly
+        run: npm install -g npm@11
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -138,8 +145,6 @@ jobs:
           fi
 
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
 
@@ -153,7 +158,7 @@ jobs:
             (
               cd "npm/${npm_dir}" &&
               npm version "${VERSION}" --no-git-tag-version --allow-same-version &&
-              npm publish --access public
+              npm stage publish --access public
             )
           }
 
@@ -164,46 +169,36 @@ jobs:
           publish_platform "inboxapi-cli-windows-x64"  "cli-win32-x64"  "inboxapi-cli.exe"
 
       - name: Publish main package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
 
-          # Stamp version on root package and align optionalDependencies
-          OPTIONAL_DEPS="$(
-            node -e "
-              const fs = require('fs');
-              const pkg = require('./package.json');
-              pkg.version = '${VERSION}';
-              const deps = Object.keys(pkg.optionalDependencies || {});
-              for (const dep of deps) {
-                pkg.optionalDependencies[dep] = '${VERSION}';
-              }
-              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-              console.log(deps.join(' '));
-            "
-          )"
+          # Stamp version on root package and align optionalDependencies.
+          # No availability wait: with staged-only publishers the platform
+          # packages stay invisible until manually approved, and staging does
+          # not validate that dependencies exist (they are optional anyway).
+          node -e "
+            const fs = require('fs');
+            const pkg = require('./package.json');
+            pkg.version = '${VERSION}';
+            const deps = Object.keys(pkg.optionalDependencies || {});
+            for (const dep of deps) {
+              pkg.optionalDependencies[dep] = '${VERSION}';
+            }
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
 
-          # Wait for platform packages to be visible on npm before publishing main package
-          if [ -n "$OPTIONAL_DEPS" ]; then
-            for dep in $OPTIONAL_DEPS; do
-              echo "Verifying availability of ${dep}@${VERSION} on npm..."
-              attempt=1
-              max_attempts=5
-              while true; do
-                if npm view "${dep}@${VERSION}" version --json >/dev/null 2>&1; then
-                  echo "Found ${dep}@${VERSION} on npm."
-                  break
-                fi
-                if [ "$attempt" -ge "$max_attempts" ]; then
-                  echo "ERROR: ${dep}@${VERSION} not visible on npm after ${max_attempts} attempts." >&2
-                  exit 1
-                fi
-                echo "  ${dep}@${VERSION} not yet visible (attempt ${attempt}/${max_attempts}), retrying in 10s..."
-                attempt=$((attempt + 1))
-                sleep 10
-              done
-            done
-          fi
+          npm stage publish --access public
 
-          npm publish --access public
+      - name: Manual approval checklist
+        # Staged-only publishers need human approval in the npm console.
+        # Approve platform packages first: if the main package goes live
+        # while its platform binary is still a draft, consumers without a
+        # local Rust toolchain cannot start the CLI (index.js falls back to
+        # target/ and cargo, which do not exist on their machines).
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          echo "Version ${VERSION} staged as drafts. Approve in the npm console in this order:"
+          echo "  1. Platform packages:"
+          node -e "Object.keys(require('./package.json').optionalDependencies || {}).forEach((d) => console.log('     - ' + d + '@${VERSION}'))"
+          echo "  2. @inboxapi/cli@${VERSION} (main package, approve last)"
