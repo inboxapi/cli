@@ -5775,16 +5775,30 @@ mod tests {
 
     // --- rewrite_tools_list tests ---
 
+    // Serializes tests that mutate process-global environment variables. Rust
+    // runs tests in threads sharing one environment, so unsynchronized
+    // set/restore pairs race: one guard's Drop can remove the variable right
+    // after another guard set it, making env-dependent assertions flaky.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct EnvVarGuard {
         key: &'static str,
         prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            let lock = ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let prev = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, prev }
+            Self {
+                key,
+                prev,
+                _lock: lock,
+            }
         }
     }
 
