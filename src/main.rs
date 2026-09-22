@@ -9130,4 +9130,192 @@ mod tests {
             );
         }
     }
+
+    // --- rate-limit warning injection (HTTP error path) ---
+
+    #[test]
+    fn inject_rate_limit_warning_appends_retry_hint() {
+        let mut response = json!({"error": {"code": -32000, "message": "Rate limit exceeded"}});
+        inject_rate_limit_warning(&mut response, 30);
+        assert_eq!(
+            response["error"]["message"], "Rate limit exceeded Retry after 30 seconds.",
+            "retry hint should be appended to rate-limit errors"
+        );
+    }
+
+    #[test]
+    fn inject_rate_limit_warning_matches_case_insensitively() {
+        let mut response = json!({"error": {"message": "RATE LIMIT hit"}});
+        inject_rate_limit_warning(&mut response, 5);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .ends_with("Retry after 5 seconds."),
+            "case-insensitive match should append retry hint, got: {}",
+            response["error"]["message"]
+        );
+    }
+
+    #[test]
+    fn inject_rate_limit_warning_leaves_other_errors_untouched() {
+        let mut response = json!({"error": {"message": "Mailbox not found"}});
+        inject_rate_limit_warning(&mut response, 30);
+        assert_eq!(
+            response["error"]["message"], "Mailbox not found",
+            "non-rate-limit errors must not be modified"
+        );
+    }
+
+    #[test]
+    fn inject_rate_limit_warning_handles_missing_error() {
+        let mut response = json!({"result": {"ok": true}});
+        inject_rate_limit_warning(&mut response, 30);
+        assert_eq!(
+            response,
+            json!({"result": {"ok": true}}),
+            "responses without an error must be untouched"
+        );
+    }
+
+    // --- recipient normalization (send/forward/reply routing) ---
+
+    #[test]
+    fn normalize_email_trims_and_lowercases() {
+        assert_eq!(
+            normalize_email("  Alice@Example.COM "),
+            "alice@example.com",
+            "emails should be trimmed and lowercased"
+        );
+    }
+
+    #[test]
+    fn is_internal_recipient_matches_owned_domain() {
+        assert!(
+            is_internal_recipient("ops@inboxapi.dev"),
+            "owned domain should be internal"
+        );
+        assert!(
+            is_internal_recipient("  OPS@INBOXAPI.DEV "),
+            "match should be case-insensitive and trimmed"
+        );
+    }
+
+    #[test]
+    fn is_internal_recipient_rejects_lookalikes() {
+        assert!(
+            !is_internal_recipient("ops@inboxapi.dev.evil.com"),
+            "suffix spoof must not count as internal"
+        );
+        assert!(
+            !is_internal_recipient("user@example.com"),
+            "external domain must not count as internal"
+        );
+    }
+
+    #[test]
+    fn extract_string_list_handles_arrays_strings_and_junk() {
+        assert_eq!(
+            extract_string_list(&json!(["A@x.com", 42, "", " b@y.com "])),
+            vec!["a@x.com", "b@y.com"],
+            "should keep normalized strings and drop non-strings/empties"
+        );
+        assert_eq!(
+            extract_string_list(&json!(" Solo@Z.com ")),
+            vec!["solo@z.com"],
+            "plain string should become a single-element list"
+        );
+        assert!(
+            extract_string_list(&json!(123)).is_empty(),
+            "non-string scalar should yield an empty list"
+        );
+        assert!(
+            extract_string_list(&Value::Null).is_empty(),
+            "null should yield an empty list"
+        );
+    }
+
+    #[test]
+    fn collect_recipients_merges_to_cc_and_bcc() {
+        let args = json!({
+            "to": "a@x.com",
+            "cc": ["b@x.com"],
+            "bcc": "c@x.com",
+            "subject": "hi"
+        });
+        assert_eq!(
+            collect_recipients(&args),
+            vec!["a@x.com", "b@x.com", "c@x.com"],
+            "recipients should merge to/cc/bcc in order"
+        );
+        assert!(
+            collect_recipients(&json!({})).is_empty(),
+            "missing recipient fields should yield an empty list"
+        );
+    }
+
+    #[test]
+    fn parse_addressbook_emails_accepts_object_and_array_shapes() {
+        let object =
+            r#"{"contacts": [{"email": "A@X.com"}, {"address": "b@y.com"}, {"email": ""}, {}]}"#;
+        let parsed = parse_addressbook_emails(object);
+        assert_eq!(
+            parsed.len(),
+            2,
+            "should keep two valid emails, got: {parsed:?}"
+        );
+        assert!(
+            parsed.contains("a@x.com"),
+            "email field should be picked up"
+        );
+        assert!(
+            parsed.contains("b@y.com"),
+            "address field should be picked up"
+        );
+
+        let array = r#"[{"email": "c@z.com"}]"#;
+        assert!(
+            parse_addressbook_emails(array).contains("c@z.com"),
+            "bare array shape should be accepted"
+        );
+        assert!(
+            parse_addressbook_emails("not json").is_empty(),
+            "invalid JSON should yield an empty set"
+        );
+    }
+
+    // --- small formatting helpers ---
+
+    #[test]
+    fn normalize_body_newlines_converts_crlf_and_cr() {
+        assert_eq!(
+            normalize_body_newlines("a\r\nb\rc".to_string()),
+            "a\nb\nc",
+            "CRLF and lone CR should become LF"
+        );
+        assert_eq!(
+            normalize_body_newlines("plain".to_string()),
+            "plain",
+            "LF-only input must be unchanged"
+        );
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_only_truncates_overlong_input() {
+        assert_eq!(
+            truncate_with_ellipsis("hello", 5),
+            "hello",
+            "input at exactly max_len must not gain an ellipsis"
+        );
+        assert_eq!(
+            truncate_with_ellipsis("hello!", 5),
+            "hello...",
+            "overlong input should be cut with an ellipsis"
+        );
+        assert_eq!(
+            truncate_with_ellipsis("hi", 5),
+            "hi",
+            "short input must be unchanged"
+        );
+    }
 }
