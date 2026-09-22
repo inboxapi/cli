@@ -4,7 +4,7 @@ Rust STDIO proxy that bridges JSON-RPC (MCP protocol) over STDIO to the remote I
 
 ## Overview
 
-- **Technology:** Rust (Tokio async runtime, reqwest HTTP client, eventsource-client SSE)
+- **Technology:** Rust (Tokio async runtime, reqwest HTTP client, manual SSE parsing over `bytes_stream()`)
 - **Protocol:** JSON-RPC over STDIO (MCP standard)
 - **Transport:** HTTP POST + SSE to remote endpoint
 - **Distribution:** npm with platform-specific optional dependencies
