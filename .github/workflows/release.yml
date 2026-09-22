@@ -188,3 +188,17 @@ jobs:
           "
 
           npm stage publish --access public
+
+      - name: Manual approval checklist
+        # Staged-only publishers need human approval in the npm console.
+        # Approve platform packages first: if the main package goes live
+        # while its platform binary is still a draft, consumers without a
+        # local Rust toolchain cannot start the CLI (index.js falls back to
+        # target/ and cargo, which do not exist on their machines).
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          echo "Version ${VERSION} staged as drafts. Approve in the npm console in this order:"
+          echo "  1. Platform packages:"
+          node -e "Object.keys(require('./package.json').optionalDependencies || {}).forEach((d) => console.log('     - ' + d + '@${VERSION}'))"
+          echo "  2. @inboxapi/cli@${VERSION} (main package, approve last)"
