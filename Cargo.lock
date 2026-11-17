@@ -655,6 +655,7 @@ dependencies = [
  "clap",
  "data-encoding",
  "dirs",
+ "libc",
  "mime_guess",
  "rand 0.8.8",
  "reqwest",
@@ -664,6 +665,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "url",
 ]
 
 [[package]]

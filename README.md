@@ -99,10 +99,10 @@ Starts the STDIO proxy. Reads JSON-RPC messages from stdin, forwards them to the
 ```bash
 inboxapi proxy
 inboxapi proxy --endpoint https://custom-endpoint.example.com/mcp
-inboxapi proxy --claim-secret ibx...
+INBOXAPI_CLAIM_SECRET=ibx... inboxapi proxy
 ```
 
-Running `inboxapi` with no subcommand also starts the proxy. `--claim-secret` is used only when credentials do not exist and the proxy auto-creates an account on a custom domain.
+Running `inboxapi` with no subcommand also starts the proxy. The claim secret (`INBOXAPI_CLAIM_SECRET`, or `--claim-secret`) is used only when credentials do not exist and the proxy auto-creates an account on a custom domain. Prefer the environment variable so the secret does not appear in process listings or shell history.
 
 ### `login`
 
@@ -112,7 +112,7 @@ Manually creates an account with a chosen name and stores access credentials loc
 inboxapi login
 inboxapi login --name myaccount
 inboxapi login --endpoint https://custom-endpoint.example.com/mcp
-inboxapi login --name myaccount --claim-secret ibx...
+INBOXAPI_CLAIM_SECRET=ibx... inboxapi login --name myaccount
 ```
 
 ### `custom-domain-claim`
@@ -120,7 +120,7 @@ inboxapi login --name myaccount --claim-secret ibx...
 Claims a custom-domain primary mailbox for the current account using a custom domain claim secret. The old generated mailbox remains receive-enabled but cannot send.
 
 ```bash
-inboxapi custom-domain-claim --secret ibx... --email-address myaccount@example.com
+INBOXAPI_CUSTOM_DOMAIN_SECRET=ibx... inboxapi custom-domain-claim --email-address myaccount@example.com
 ```
 
 ### `whoami`
@@ -220,7 +220,10 @@ inboxapi search-emails --subject "invoice" --limit 10
 ```bash
 inboxapi get-attachment abc123                      # prints signed URL as JSON
 inboxapi get-attachment abc123 --output ./file.pdf  # downloads to file
+inboxapi get-attachment abc123 --output ./file.pdf --force  # overwrite an existing file
 ```
+
+Downloads refuse to overwrite an existing file unless `--force` is passed, never write through a symlink, and are created with owner-only permissions. The download URL must be `https` and must not point at a private, loopback or link-local address (including after redirects or DNS resolution).
 
 ### `send-reply`
 

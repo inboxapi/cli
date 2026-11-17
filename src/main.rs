@@ -22,6 +22,23 @@ const MAX_SSE_EVENT_SIZE: usize = 5 * 1024 * 1024;
 const MAX_BODY_FILE_BYTES: u64 = 20 * 1024 * 1024;
 /// Maximum size of an attachment download (100MB) to prevent memory exhaustion.
 const MAX_ATTACHMENT_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
+/// Maximum size of a local attachment file read from disk (25MiB).
+const MAX_ATTACHMENT_FILE_BYTES: u64 = 25 * 1024 * 1024;
+/// Maximum size of a plain JSON API response body (10MiB).
+const MAX_JSON_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+/// Maximum length of a single STDIN line in proxy mode (10MiB).
+const MAX_STDIN_LINE_BYTES: usize = 10 * 1024 * 1024;
+/// Overall timeout for a single API request, including the full response body (seconds).
+/// Generous enough for large attachment uploads and slow tool calls.
+const API_TIMEOUT_SECS: u64 = 300;
+/// Timeout for establishing a TCP/TLS connection (seconds).
+const API_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Maximum idle time between reads of a response body (seconds).
+const API_READ_TIMEOUT_SECS: u64 = 60;
+/// Maximum number of characters of a server error body included in error output.
+const ERROR_PREVIEW_CHARS: usize = 300;
+/// Maximum size of a credentials backup file accepted by restore (1MiB).
+const MAX_CREDENTIALS_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Parser)]
 #[command(name = "inboxapi", bin_name = "inboxapi")]
@@ -46,8 +63,12 @@ enum Commands {
     Proxy {
         #[arg(long, default_value = "https://mcp.inboxapi.ai/mcp")]
         endpoint: String,
-        /// Custom domain claim secret used only when auto-creating credentials
-        #[arg(long = "claim-secret")]
+        /// Custom domain claim secret used only when auto-creating credentials (prefer INBOXAPI_CLAIM_SECRET env var)
+        #[arg(
+            long = "claim-secret",
+            env = "INBOXAPI_CLAIM_SECRET",
+            hide_env_values = true
+        )]
         claim_secret: Option<String>,
     },
     /// Log in and create credentials
@@ -56,14 +77,22 @@ enum Commands {
         name: Option<String>,
         #[arg(long, default_value = "https://mcp.inboxapi.ai/mcp")]
         endpoint: String,
-        /// Custom domain claim secret used during account creation
-        #[arg(long = "claim-secret")]
+        /// Custom domain claim secret used during account creation (prefer INBOXAPI_CLAIM_SECRET env var)
+        #[arg(
+            long = "claim-secret",
+            env = "INBOXAPI_CLAIM_SECRET",
+            hide_env_values = true
+        )]
         claim_secret: Option<String>,
     },
     /// Claim a custom-domain primary mailbox for the current account
     CustomDomainClaim {
-        /// Custom domain claim secret
-        #[arg(long = "secret")]
+        /// Custom domain claim secret (prefer INBOXAPI_CUSTOM_DOMAIN_SECRET env var)
+        #[arg(
+            long = "secret",
+            env = "INBOXAPI_CUSTOM_DOMAIN_SECRET",
+            hide_env_values = true
+        )]
         secret: String,
         /// Full custom-domain email address to claim
         #[arg(long = "email-address")]
@@ -200,6 +229,9 @@ enum Commands {
         /// Save the attachment to this path
         #[arg(long)]
         output: Option<String>,
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
     },
     /// Reply to an email
     SendReply {
@@ -306,8 +338,8 @@ enum Commands {
     AuthIntrospect,
     /// Revoke a specific token
     AuthRevoke {
-        /// The token to revoke
-        #[arg(long)]
+        /// The token to revoke (prefer INBOXAPI_REVOKE_TOKEN env var)
+        #[arg(long, env = "INBOXAPI_REVOKE_TOKEN", hide_env_values = true)]
         token: String,
     },
     /// Revoke all tokens for the current account
@@ -343,11 +375,11 @@ enum Commands {
     /// Rotate encryption secret
     #[command(name = "rotate-encryption")]
     RotateEncryptionSecret {
-        /// Current encryption secret
-        #[arg(long)]
+        /// Current encryption secret (prefer INBOXAPI_OLD_SECRET env var)
+        #[arg(long, env = "INBOXAPI_OLD_SECRET", hide_env_values = true)]
         old_secret: String,
-        /// New encryption secret
-        #[arg(long)]
+        /// New encryption secret (prefer INBOXAPI_NEW_SECRET env var)
+        #[arg(long, env = "INBOXAPI_NEW_SECRET", hide_env_values = true)]
         new_secret: String,
     },
     /// Show CLI help with examples
@@ -425,16 +457,14 @@ async fn read_version_cache() -> Option<VersionCache> {
 
 async fn write_version_cache(latest_version: &str) -> Result<()> {
     let path = get_version_cache_path()?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
     let cache = VersionCache {
         latest_version: latest_version.to_string(),
         checked_at: chrono::Utc::now().to_rfc3339(),
     };
     let content = serde_json::to_string_pretty(&cache)?;
-    tokio::fs::write(path, content).await?;
-    Ok(())
+    tokio::task::spawn_blocking(move || write_file_guarded(&path, content.as_bytes(), 0o644))
+        .await
+        .context("Version cache write task failed")?
 }
 
 fn is_cache_stale(cache: &VersionCache) -> bool {
@@ -527,32 +557,481 @@ fn load_credentials() -> Result<Credentials> {
 }
 
 fn save_credentials(creds: &Credentials) -> Result<()> {
+    validate_endpoint(&creds.endpoint)?;
     let path = get_credentials_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let content = serde_json::to_string_pretty(creds)?;
+    write_file_guarded(&path, content.as_bytes(), 0o600)
+}
 
+/// Returns true for loopback hosts allowed with plain http for local development.
+fn is_loopback_host(host: &str) -> bool {
+    let h = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+/// Validate that an API endpoint URL uses an approved transport.
+/// Accepts https everywhere and http only for loopback development hosts.
+/// The raw value is never echoed back, since it may embed credentials.
+fn validate_endpoint(raw: &str) -> Result<()> {
+    let url = url::Url::parse(raw.trim()).map_err(|_| {
+        anyhow!("Invalid endpoint URL: expected an absolute https:// URL (e.g. https://mcp.inboxapi.ai/mcp)")
+    })?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(anyhow!("Endpoint URL must not contain credentials"));
+    }
+    if url.host_str().unwrap_or_default().is_empty() {
+        return Err(anyhow!("Endpoint URL must include a host"));
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(url.host_str().unwrap_or_default()) => Ok(()),
+        "http" => Err(anyhow!(
+            "Refusing plain http endpoint for non-loopback host (use https)"
+        )),
+        other => Err(anyhow!("Unsupported endpoint scheme: {}", other)),
+    }
+}
+
+/// Returns true when an endpoint URL points at a loopback development host.
+fn endpoint_is_loopback(endpoint: &str) -> bool {
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.host_str().map(is_loopback_host))
+        .unwrap_or(false)
+}
+
+/// Returns true for loopback addresses, including IPv4-mapped IPv6 loopback.
+fn is_loopback_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
+}
+
+/// Returns true when an IP address is not a globally routable unicast address
+/// (private, loopback, link-local, CGNAT, multicast, reserved, documentation, ...).
+fn is_non_public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    fn v4_non_public(v4: Ipv4Addr) -> bool {
+        let o = v4.octets();
+        v4.is_private()
+            || v4.is_loopback()
+            || v4.is_link_local()
+            || v4.is_unspecified()
+            || v4.is_broadcast()
+            || v4.is_multicast()
+            || v4.is_documentation()
+            || o[0] == 0 // 0.0.0.0/8 "this network"
+            || (o[0] == 100 && (64..=127).contains(&o[1])) // 100.64.0.0/10 CGNAT
+            || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24 IETF protocol assignments
+            || (o[0] == 198 && (18..=19).contains(&o[1])) // 198.18.0.0/15 benchmarking
+            || o[0] >= 240 // 240.0.0.0/4 reserved
+    }
+    match ip {
+        IpAddr::V4(v4) => v4_non_public(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4_non_public(v4);
+            }
+            let s = v6.segments();
+            // NAT64 well-known prefix 64:ff9b::/96 embeds an IPv4 address.
+            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) {
+                let v4 =
+                    Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+                return v4_non_public(v4);
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || (s[0] & 0xffc0) == 0xfec0 // fec0::/10 deprecated site-local
+                || (s[0] == 0x2001 && s[1] == 0x0db8) // 2001:db8::/32 documentation
+        }
+    }
+}
+
+/// Returns true when a download may connect to this address.
+/// Loopback is only permitted when the configured API endpoint is itself loopback.
+fn is_allowed_download_ip(ip: std::net::IpAddr, allow_loopback: bool) -> bool {
+    if is_loopback_ip(ip) {
+        return allow_loopback;
+    }
+    !is_non_public_ip(ip)
+}
+
+/// Validate a server-provided download URL (and every redirect hop) before fetching it.
+/// Requires https, rejects embedded credentials, and rejects internal destinations.
+/// Loopback (and plain http to loopback) is only allowed for loopback API endpoints.
+fn validate_download_url(raw: &str, allow_loopback: bool) -> Result<()> {
+    let parsed =
+        url::Url::parse(raw).map_err(|_| anyhow!("Invalid download URL received from server"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(anyhow!("Refusing download URL containing credentials"));
+    }
+    let host = parsed
+        .host()
+        .ok_or_else(|| anyhow!("Download URL has no host"))?;
+    let host_is_loopback = match &host {
+        url::Host::Domain(d) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            d == "localhost" || d.ends_with(".localhost")
+        }
+        url::Host::Ipv4(v4) => is_loopback_ip(std::net::IpAddr::V4(*v4)),
+        url::Host::Ipv6(v6) => is_loopback_ip(std::net::IpAddr::V6(*v6)),
+    };
+    match parsed.scheme() {
+        "https" => {}
+        "http" if allow_loopback && host_is_loopback => {}
+        "http" => return Err(anyhow!("Refusing non-https download URL")),
+        other => return Err(anyhow!("Unsupported download URL scheme: {}", other)),
+    }
+    if host_is_loopback && !allow_loopback {
+        return Err(anyhow!(
+            "Refusing download URL pointing at a loopback address"
+        ));
+    }
+    let literal_ip = match host {
+        url::Host::Ipv4(v4) => Some(std::net::IpAddr::V4(v4)),
+        url::Host::Ipv6(v6) => Some(std::net::IpAddr::V6(v6)),
+        url::Host::Domain(_) => None,
+    };
+    if let Some(ip) = literal_ip {
+        if !is_allowed_download_ip(ip, allow_loopback) {
+            return Err(anyhow!(
+                "Refusing download URL pointing at an internal address"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// DNS resolver for attachment downloads that refuses hostnames resolving to
+/// internal addresses. Because reqwest connects to exactly the addresses this
+/// returns, the check cannot be bypassed by DNS rebinding between check and use.
+struct PublicOnlyResolver {
+    allow_loopback: bool,
+}
+
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow_loopback = self.allow_loopback;
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            if addrs.is_empty() {
+                return Err(format!("{} did not resolve to any address", host).into());
+            }
+            if addrs
+                .iter()
+                .any(|a| !is_allowed_download_ip(a.ip(), allow_loopback))
+            {
+                return Err(format!(
+                    "Refusing download: {} resolves to an internal address",
+                    host
+                )
+                .into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Build the HTTP client used for server-provided download URLs.
+/// Every redirect hop is re-validated and DNS answers are filtered.
+fn build_download_client(allow_loopback: bool) -> Result<HttpClient> {
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("too many redirects");
+        }
+        match validate_download_url(attempt.url().as_str(), allow_loopback) {
+            Ok(()) => attempt.follow(),
+            Err(e) => attempt.error(e.to_string()),
+        }
+    });
+    reqwest::Client::builder()
+        .redirect(policy)
+        .dns_resolver(std::sync::Arc::new(PublicOnlyResolver { allow_loopback }))
+        .connect_timeout(Duration::from_secs(API_CONNECT_TIMEOUT_SECS))
+        .read_timeout(Duration::from_secs(API_READ_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(ATTACHMENT_DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .context("Failed to build download client")
+}
+
+/// Reject symlink traversal for a path being created or written.
+/// Only the target and its direct parent are checked so system-level
+/// symlinks above the work area (e.g. /var -> /private/var on macOS)
+/// do not cause false rejections. Pair with `open_nofollow` for the
+/// final component so a swap between check and open is also refused.
+fn guard_no_symlink(path: &Path) -> Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    for candidate in std::iter::once(path).chain(parent) {
+        if let Ok(meta) = std::fs::symlink_metadata(candidate) {
+            if meta.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "Refusing to write through symlink: {}",
+                    candidate.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Create `dir` (and missing ancestors) after refusing symlinks at `dir` and its parent.
+fn create_dir_all_guarded(dir: &Path) -> Result<()> {
+    guard_no_symlink(dir)?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("Failed to create directory {}", dir.display()))
+}
+
+/// Open a file for writing without following a symlink at the final path component.
+/// `create_new` refuses any existing file; otherwise an existing file is truncated.
+/// On unix the file is created with `mode` and opened with `O_NOFOLLOW`.
+fn open_nofollow(path: &Path, create_new: bool, mode: u32) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    if create_new {
+        opts.create_new(true);
+    } else {
+        opts.create(true).truncate(true);
+    }
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
+        opts.mode(mode).custom_flags(libc::O_NOFOLLOW);
     }
-
     #[cfg(not(unix))]
-    {
-        std::fs::write(path, content)?;
-    }
+    let _ = mode;
+    opts.open(path)
+}
 
-    Ok(())
+/// Write `content` to `path` with symlink guards and no-follow semantics.
+fn write_file_guarded(path: &Path, content: &[u8], mode: u32) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_dir_all_guarded(parent)?;
+    }
+    guard_no_symlink(path)?;
+    let mut file = open_nofollow(path, false, mode)
+        .with_context(|| format!("Failed to open {} for writing", path.display()))?;
+    file.write_all(content)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to flush {}", path.display()))
+}
+
+/// Read a regular file with a byte cap, rejecting symlinks, special files and TOCTOU swaps.
+fn read_regular_file_bounded(path: &Path, what: &str, cap: u64) -> Result<Vec<u8>> {
+    let pre = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Failed to read metadata for {} {}", what, path.display()))?;
+    if pre.file_type().is_symlink() {
+        return Err(anyhow!(
+            "{} path must not be a symlink (pass the real file path): {}",
+            what,
+            path.display()
+        ));
+    }
+    if !pre.is_file() {
+        return Err(anyhow!(
+            "{} path must be a regular file: {}",
+            what,
+            path.display()
+        ));
+    }
+    // Pre-check above avoids blocking on FIFOs; re-check the opened handle so a
+    // swap between check and open is detected.
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open {} {}", what, path.display()))?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("Failed to read metadata for {} {}", what, path.display()))?;
+    if !meta.is_file() {
+        return Err(anyhow!(
+            "{} path must be a regular file: {}",
+            what,
+            path.display()
+        ));
+    }
+    if meta.len() > cap {
+        return Err(anyhow!(
+            "{} exceeds {} bytes: {}",
+            what,
+            cap,
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(meta.len().min(cap) as usize);
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("Failed to read {} {}", what, path.display()))?;
+    if bytes.len() as u64 > cap {
+        return Err(anyhow!(
+            "{} exceeds {} bytes: {}",
+            what,
+            cap,
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Open an output file fail-closed: no symlink following, no silent overwrite.
+fn open_output_for_write(path: &Path, force: bool) -> Result<std::fs::File> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(anyhow!(
+                "Refusing to write through symlink: {} (resolve it and retry)",
+                path.display()
+            ));
+        }
+        if !meta.is_file() {
+            return Err(anyhow!(
+                "Output path exists and is not a regular file: {}",
+                path.display()
+            ));
+        }
+        if !force {
+            return Err(anyhow!(
+                "Output file already exists: {} (use --force to overwrite)",
+                path.display()
+            ));
+        }
+    }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_dir_all_guarded(parent)?;
+    }
+    guard_no_symlink(path)?;
+    let file = open_nofollow(path, !force, 0o600).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow!(
+                "Output file already exists: {} (use --force to overwrite)",
+                path.display()
+            )
+        } else {
+            anyhow!("Failed to open output file {}: {}", path.display(), e)
+        }
+    })?;
+    // `mode` only applies on creation; tighten an overwritten file too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(file)
+}
+
+/// Build the shared API client with connect, idle-read and overall timeouts.
+fn build_api_client() -> HttpClient {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(API_CONNECT_TIMEOUT_SECS))
+        .read_timeout(Duration::from_secs(API_READ_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(API_TIMEOUT_SECS))
+        .build()
+        .expect("HTTP client configuration is valid")
+}
+
+/// Read a response body, failing once it exceeds `cap` bytes (checked against
+/// Content-Length up front and while streaming, so chunked bodies are bounded too).
+async fn read_body_capped(resp: reqwest::Response, cap: u64, what: &str) -> Result<Vec<u8>> {
+    use tokio_stream::StreamExt as _;
+
+    if let Some(len) = resp.content_length() {
+        if len > cap {
+            return Err(anyhow!(
+                "{} too large ({} bytes, max {} bytes)",
+                what,
+                len,
+                cap
+            ));
+        }
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("Failed to read {}", what))?;
+        if (buf.len() + chunk.len()) as u64 > cap {
+            return Err(anyhow!("{} too large (max {} bytes)", what, cap));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Truncate server text for error output so full bodies never land in logs.
+fn redacted_preview(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let kept: String = trimmed.chars().take(max_chars).collect();
+    format!("{}… [truncated]", kept)
+}
+
+/// Bounded, truncated preview of an error response body for diagnostics.
+async fn error_body_preview(resp: reqwest::Response) -> String {
+    redacted_preview(&response_preview(resp).await, ERROR_PREVIEW_CHARS)
+}
+
+/// Result of reading one newline-delimited line with a length cap.
+#[derive(Debug, PartialEq)]
+enum BoundedLine {
+    Line(String),
+    TooLong,
+    InvalidUtf8,
+    Eof,
+}
+
+/// Read one `\n`-terminated line (trailing `\r` stripped) of at most `max` bytes.
+/// Over-limit lines are drained to the next newline without being buffered and
+/// reported as `TooLong`, so a single oversized line cannot grow memory without bound.
+async fn read_bounded_line<R>(reader: &mut R, max: usize) -> std::io::Result<BoundedLine>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut buf: Vec<u8> = Vec::new();
+    let mut too_long = false;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if too_long {
+                return Ok(BoundedLine::TooLong);
+            }
+            if buf.is_empty() {
+                return Ok(BoundedLine::Eof);
+            }
+            break;
+        }
+        let newline = chunk.iter().position(|&b| b == b'\n');
+        let take = newline.unwrap_or(chunk.len());
+        if !too_long {
+            if buf.len() + take > max {
+                too_long = true;
+                buf = Vec::new();
+            } else {
+                buf.extend_from_slice(&chunk[..take]);
+            }
+        }
+        reader.consume(take + usize::from(newline.is_some()));
+        if newline.is_some() {
+            if too_long {
+                return Ok(BoundedLine::TooLong);
+            }
+            break;
+        }
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    Ok(String::from_utf8(buf)
+        .map(BoundedLine::Line)
+        .unwrap_or(BoundedLine::InvalidUtf8))
 }
 
 fn prompt_yes_no(prompt: &str) -> bool {
@@ -653,10 +1132,10 @@ fn expand_tilde(path: &str) -> PathBuf {
 fn backup_credentials(folder: &str) -> Result<()> {
     let creds = load_credentials()?;
     let dest = expand_tilde(folder);
-    std::fs::create_dir_all(&dest)
-        .with_context(|| format!("Failed to create directory {}", dest.display()))?;
+    create_dir_all_guarded(&dest)?;
 
     let dest_file = dest.join("credentials.json");
+    guard_no_symlink(&dest_file)?;
 
     if dest_file.exists() && !prompt_yes_no("Backup file already exists. Overwrite? [y/N] ") {
         println!("Aborted.");
@@ -664,24 +1143,7 @@ fn backup_credentials(folder: &str) -> Result<()> {
     }
 
     let content = serde_json::to_string_pretty(&creds)?;
-
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&dest_file)?;
-        file.write_all(content.as_bytes())?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&dest_file, content)?;
-    }
+    write_file_guarded(&dest_file, content.as_bytes(), 0o600)?;
 
     println!("Credentials backed up to {}", dest_file.display());
     Ok(())
@@ -689,10 +1151,12 @@ fn backup_credentials(folder: &str) -> Result<()> {
 
 fn restore_credentials(folder: &str) -> Result<()> {
     let src_file = expand_tilde(folder).join("credentials.json");
-    let content = std::fs::read_to_string(&src_file)
-        .with_context(|| format!("Failed to read {}", src_file.display()))?;
-    let creds: Credentials = serde_json::from_str(&content)
+    let content =
+        read_regular_file_bounded(&src_file, "Credentials backup", MAX_CREDENTIALS_FILE_BYTES)?;
+    let creds: Credentials = serde_json::from_slice(&content)
         .with_context(|| format!("Invalid credentials format in {}", src_file.display()))?;
+    validate_endpoint(&creds.endpoint)
+        .with_context(|| format!("Backup in {} has an unsafe endpoint", src_file.display()))?;
 
     if creds.access_token.trim().is_empty() || creds.refresh_token.trim().is_empty() {
         return Err(anyhow!(
@@ -1053,6 +1517,7 @@ fn prompt_agent_selection(detected: &[(Agent, bool)]) -> Result<HashSet<Agent>> 
 /// Write a file if it doesn't exist, content differs, or force is set.
 /// Returns a status string for display.
 fn write_if_needed(path: &Path, content: &str, force: bool) -> Result<&'static str> {
+    guard_no_symlink(path)?;
     if path.exists() && !force {
         let existing = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read existing {}", path.display()))?;
@@ -1061,11 +1526,7 @@ fn write_if_needed(path: &Path, content: &str, force: bool) -> Result<&'static s
         }
         return Ok("skipped");
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
-    }
-    std::fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+    write_file_guarded(path, content.as_bytes(), 0o644)?;
     Ok("installed")
 }
 
@@ -1080,8 +1541,7 @@ fn install_skills_to_dir(
 
     for (name, content) in skills {
         let dir = base_dir.join(name);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+        create_dir_all_guarded(&dir)?;
         let path = dir.join("SKILL.md");
         match write_if_needed(&path, content, force)? {
             "installed" => {
@@ -1112,8 +1572,7 @@ fn install_opencode_commands(
     force: bool,
 ) -> Result<(usize, usize, usize)> {
     let base = PathBuf::from(".opencode/commands");
-    std::fs::create_dir_all(&base)
-        .with_context(|| format!("Failed to create directory {}", base.display()))?;
+    create_dir_all_guarded(&base)?;
 
     let mut installed = 0;
     let mut up_to_date = 0;
@@ -1209,9 +1668,7 @@ fn setup_skills(agents: HashSet<Agent>, force: bool) -> Result<()> {
 
                 // Write hooks
                 let hooks_dir = base.join("hooks");
-                std::fs::create_dir_all(&hooks_dir).with_context(|| {
-                    format!("Failed to create directory {}", hooks_dir.display())
-                })?;
+                create_dir_all_guarded(&hooks_dir)?;
                 let mut hooks_count = 0;
                 for (name, content) in HOOKS {
                     let path = hooks_dir.join(name);
@@ -1235,9 +1692,9 @@ fn setup_skills(agents: HashSet<Agent>, force: bool) -> Result<()> {
 
                 // Merge hook settings into .claude/settings.json
                 let settings_path = base.join("settings.json");
+                guard_no_symlink(&settings_path)?;
                 let merged = merge_hook_settings(&settings_path)?;
-                std::fs::write(&settings_path, &merged)
-                    .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+                write_file_guarded(&settings_path, merged.as_bytes(), 0o644)?;
                 println!("  Updated:         {}", settings_path.display());
 
                 summary.push((agent, installed, hooks_count));
@@ -1623,11 +2080,11 @@ async fn call_mcp_tool(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let err_text = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(anyhow!("HTTP error {}: {}", status, err_text));
+        return Err(anyhow!(
+            "HTTP error {}: {}",
+            status,
+            error_body_preview(resp).await
+        ));
     }
 
     let response = parse_response(resp).await?.body;
@@ -1893,8 +2350,8 @@ fn guess_content_type(path: &Path) -> String {
 /// Build an attachment entry from a local file path.
 fn build_attachment_from_file(path: &str) -> Result<Value> {
     let p = Path::new(path);
-    let bytes =
-        std::fs::read(p).with_context(|| format!("Failed to read attachment file: {}", path))?;
+    let bytes = read_regular_file_bounded(p, "--attachment", MAX_ATTACHMENT_FILE_BYTES)
+        .with_context(|| format!("Failed to read attachment file: {}", path))?;
     let filename = p
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -1935,23 +2392,21 @@ async fn response_preview(resp: reqwest::Response) -> String {
     String::from_utf8_lossy(&buf).trim().to_string()
 }
 
-/// Download a URL with a streaming size cap to prevent memory exhaustion.
-/// Returns the downloaded bytes, aborting early if `MAX_ATTACHMENT_DOWNLOAD_BYTES` is exceeded.
-async fn download_with_limit(http_client: &HttpClient, url: &str) -> Result<Vec<u8>> {
-    use tokio_stream::StreamExt as _;
+/// Download a server-provided URL with URL/destination validation and a streaming size cap.
+/// `allow_loopback` should only be true when the API endpoint itself is loopback (local dev).
+async fn download_with_limit(url: &str, allow_loopback: bool) -> Result<Vec<u8>> {
+    validate_download_url(url, allow_loopback)?;
+    let client = build_download_client(allow_loopback)?;
 
-    let resp = http_client
+    let resp = client
         .get(url)
-        .timeout(std::time::Duration::from_secs(
-            ATTACHMENT_DOWNLOAD_TIMEOUT_SECS,
-        ))
         .send()
         .await
         .context("Failed to download attachment")?;
 
     let status = resp.status();
     if !status.is_success() {
-        let preview = response_preview(resp).await;
+        let preview = error_body_preview(resp).await;
         return Err(anyhow!(
             "Attachment download failed with HTTP {}: {}",
             status.as_u16(),
@@ -1959,34 +2414,7 @@ async fn download_with_limit(http_client: &HttpClient, url: &str) -> Result<Vec<
         ));
     }
 
-    // Fast reject if Content-Length is present and exceeds limit
-    if let Some(content_length) = resp.content_length() {
-        if content_length > MAX_ATTACHMENT_DOWNLOAD_BYTES {
-            return Err(anyhow!(
-                "Attachment too large ({} bytes, max {} bytes)",
-                content_length,
-                MAX_ATTACHMENT_DOWNLOAD_BYTES
-            ));
-        }
-    }
-
-    // Stream the body with a running byte counter
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
-    let mut total: u64 = 0;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("Failed to read attachment chunk")?;
-        total += chunk.len() as u64;
-        if total > MAX_ATTACHMENT_DOWNLOAD_BYTES {
-            return Err(anyhow!(
-                "Attachment too large (>{} bytes, max {} bytes)",
-                total,
-                MAX_ATTACHMENT_DOWNLOAD_BYTES
-            ));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf)
+    read_body_capped(resp, MAX_ATTACHMENT_DOWNLOAD_BYTES, "Attachment").await
 }
 
 /// Resolve a server-side attachment ref to an attachment entry.
@@ -2028,7 +2456,7 @@ async fn resolve_attachment_ref(
         .to_string();
 
     // Download the file with streaming size cap
-    let bytes = download_with_limit(http_client, url).await?;
+    let bytes = download_with_limit(url, endpoint_is_loopback(endpoint)).await?;
     let content = data_encoding::BASE64.encode(&bytes);
 
     Ok(json!({
@@ -2135,60 +2563,7 @@ fn resolve_body_input(
 }
 
 fn read_body_file(path: &Path, file_flag: &str) -> Result<String> {
-    // Pre-check: reject non-regular files (FIFOs, dirs, etc.) without blocking on open.
-    let pre_meta = std::fs::symlink_metadata(path).with_context(|| {
-        format!(
-            "Failed to read metadata for {} {}",
-            file_flag,
-            path.display()
-        )
-    })?;
-    if !pre_meta.is_file() {
-        return Err(anyhow!(
-            "{} path must resolve to a regular file: {}",
-            file_flag,
-            path.display()
-        ));
-    }
-
-    // Open the file, then verify metadata on the handle to avoid TOCTOU races.
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {} {}", file_flag, path.display()))?;
-    let metadata = file.metadata().with_context(|| {
-        format!(
-            "Failed to read metadata for {} {}",
-            file_flag,
-            path.display()
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(anyhow!(
-            "{} path must resolve to a regular file: {}",
-            file_flag,
-            path.display()
-        ));
-    }
-    if metadata.len() > MAX_BODY_FILE_BYTES {
-        return Err(anyhow!(
-            "{} exceeds {} bytes: {}",
-            file_flag,
-            MAX_BODY_FILE_BYTES,
-            path.display()
-        ));
-    }
-
-    let mut bytes = Vec::with_capacity((metadata.len().min(MAX_BODY_FILE_BYTES)) as usize);
-    file.take(MAX_BODY_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("Failed to read {} {}", file_flag, path.display()))?;
-    if bytes.len() as u64 > MAX_BODY_FILE_BYTES {
-        return Err(anyhow!(
-            "{} exceeds {} bytes: {}",
-            file_flag,
-            MAX_BODY_FILE_BYTES,
-            path.display()
-        ));
-    }
+    let bytes = read_regular_file_bounded(path, file_flag, MAX_BODY_FILE_BYTES)?;
 
     let text = String::from_utf8(bytes).with_context(|| {
         format!(
@@ -2585,9 +2960,14 @@ Examples:
   inboxapi send-reply --message-id \"<msg-id>\" --body \"Thanks!\"
   inboxapi send-reply --message-id \"<msg-id>\" --body-file ./reply.txt --html-body-file ./reply.html
   inboxapi forward-email --message-id \"<msg-id>\" --to recipient@example.com
-  inboxapi login --claim-secret ibx... --name my-agent
-  inboxapi proxy --claim-secret ibx...
-  inboxapi custom-domain-claim --secret ibx... --email-address agent@example.com
+  INBOXAPI_CLAIM_SECRET=ibx... inboxapi login --name my-agent
+  INBOXAPI_CLAIM_SECRET=ibx... inboxapi proxy
+  INBOXAPI_CUSTOM_DOMAIN_SECRET=ibx... inboxapi custom-domain-claim --email-address agent@example.com
+
+Secrets: prefer environment variables over flags so they do not appear in
+process listings or shell history (INBOXAPI_CLAIM_SECRET,
+INBOXAPI_CUSTOM_DOMAIN_SECRET, INBOXAPI_REVOKE_TOKEN, INBOXAPI_OLD_SECRET,
+INBOXAPI_NEW_SECRET).
 ";
 
 /// Run a simple MCP tool call with no arguments, print the result.
@@ -2606,7 +2986,7 @@ async fn run_simple_command(
 
 /// Run a CLI subcommand that calls an MCP tool.
 async fn run_cli_command(cli: &Cli) -> Result<()> {
-    let http_client = HttpClient::new();
+    let http_client = build_api_client();
 
     if let Some(Commands::CustomDomainClaim {
         secret,
@@ -2624,6 +3004,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
             }
         };
         let endpoint = stored_creds.endpoint.clone();
+        validate_endpoint(&endpoint)?;
         let mut creds = Some(stored_creds.clone());
         let response = call_mcp_tool(
             &endpoint,
@@ -2661,6 +3042,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
                 name
             );
             let endpoint = cli.endpoint.as_str();
+            validate_endpoint(endpoint)?;
             match create_account_and_authenticate(&name, endpoint, &http_client, None).await {
                 Ok(c) => {
                     eprintln!("[inboxapi] Account created successfully.");
@@ -2678,6 +3060,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
         .as_ref()
         .map(|c| c.endpoint.clone())
         .unwrap_or_else(|| cli.endpoint.clone());
+    validate_endpoint(&endpoint)?;
 
     match cli.command {
         Some(Commands::SendEmail {
@@ -2803,6 +3186,7 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
         Some(Commands::GetAttachment {
             ref attachment_id,
             ref output,
+            force,
         }) => {
             let args = json!({"attachment_id": attachment_id});
             let response =
@@ -2817,9 +3201,16 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
                     .as_str()
                     .or_else(|| data["url"].as_str())
                     .ok_or_else(|| anyhow!("No URL in get_attachment response"))?;
-                let bytes = download_with_limit(&http_client, url).await?;
-                std::fs::write(output_path, &bytes)
-                    .with_context(|| format!("Failed to write to {}", output_path))?;
+                let bytes = download_with_limit(url, endpoint_is_loopback(&endpoint)).await?;
+                {
+                    use std::io::Write;
+                    let out_path = Path::new(output_path);
+                    let mut file = open_output_for_write(out_path, force)?;
+                    file.write_all(&bytes)
+                        .with_context(|| format!("Failed to write to {}", out_path.display()))?;
+                    file.sync_all()
+                        .with_context(|| format!("Failed to flush {}", out_path.display()))?;
+                }
                 if cli.human {
                     println!("Downloaded to {}", output_path);
                 } else {
@@ -3162,7 +3553,8 @@ async fn run_cli_command(cli: &Cli) -> Result<()> {
 }
 
 async fn run_proxy(endpoint: String, claim_secret: Option<String>) -> Result<()> {
-    let http_client = HttpClient::new();
+    validate_endpoint(&endpoint)?;
+    let http_client = build_api_client();
 
     // Load credentials, auto-creating account if missing
     let mut creds = match load_credentials() {
@@ -3223,9 +3615,24 @@ async fn run_proxy(endpoint: String, claim_secret: Option<String>) -> Result<()>
 
     // Handle stdin -> POST, read responses as Streamable HTTP (JSON or SSE)
     let mut out = stdout();
-    let mut lines = BufReader::new(stdin()).lines();
+    let mut reader = BufReader::new(stdin());
     let mut client_ua: Option<String> = None;
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = match read_bounded_line(&mut reader, MAX_STDIN_LINE_BYTES).await? {
+            BoundedLine::Line(line) => line,
+            BoundedLine::TooLong => {
+                eprintln!(
+                    "[inboxapi] Skipping input line over {} bytes",
+                    MAX_STDIN_LINE_BYTES
+                );
+                continue;
+            }
+            BoundedLine::InvalidUtf8 => {
+                eprintln!("[inboxapi] Skipping input line that is not valid UTF-8");
+                continue;
+            }
+            BoundedLine::Eof => break,
+        };
         let mut msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -3434,10 +3841,7 @@ async fn run_proxy(endpoint: String, claim_secret: Option<String>) -> Result<()>
                         continue;
                     }
                     if !status.is_success() {
-                        let err_text = resp
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        let err_text = error_body_preview(resp).await;
                         eprintln!("POST failed ({}): {}", status, err_text);
                         if let Some(id) = msg.get("id").cloned() {
                             write_jsonrpc_error(
@@ -3617,10 +4021,7 @@ async fn run_proxy(endpoint: String, claim_secret: Option<String>) -> Result<()>
                         continue;
                     }
                     if !status.is_success() {
-                        let err_text = resp
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        let err_text = error_body_preview(resp).await;
                         eprintln!("POST failed ({}): {}", status, err_text);
                         if let Some(id) = msg.get("id").cloned() {
                             write_jsonrpc_error(
@@ -3708,7 +4109,28 @@ async fn run_proxy(endpoint: String, claim_secret: Option<String>) -> Result<()>
                             out.flush().await?;
                         }
                     } else {
-                        let mut body = resp.text().await.unwrap_or_default();
+                        let mut body = match read_body_capped(
+                            resp,
+                            MAX_JSON_RESPONSE_BYTES,
+                            "Upstream response",
+                        )
+                        .await
+                        {
+                            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                            Err(e) => {
+                                eprintln!("[inboxapi] {}", e);
+                                if let Some(id) = msg.get("id").cloned() {
+                                    write_jsonrpc_error(
+                                        &mut out,
+                                        id,
+                                        -32603,
+                                        "Upstream response too large or unreadable",
+                                    )
+                                    .await?;
+                                }
+                                continue;
+                            }
+                        };
                         if !body.is_empty() && !is_notification {
                             let update_ref = version_rx.borrow();
                             if method == "initialize" {
@@ -3780,9 +4202,8 @@ async fn parse_response(resp: reqwest::Response) -> Result<ParsedResponse> {
         .to_string();
 
     let body = if content_type.contains("application/json") {
-        resp.json::<Value>()
-            .await
-            .context("Failed to parse JSON response")?
+        let bytes = read_body_capped(resp, MAX_JSON_RESPONSE_BYTES, "API response").await?;
+        serde_json::from_slice::<Value>(&bytes).context("Failed to parse JSON response")?
     } else if content_type.contains("text/event-stream") {
         use tokio_stream::StreamExt as _;
         let mut stream = resp.bytes_stream();
@@ -5179,7 +5600,7 @@ async fn create_account_and_authenticate(
         .and_then(|c| c.first())
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Failed to parse account_create response: {:?}", resp))?;
+        .ok_or_else(|| anyhow!("Failed to parse account_create response"))?;
 
     let account_data: Value = serde_json::from_str(content)?;
     let bootstrap_token = account_data["bootstrap_token"]
@@ -5213,7 +5634,7 @@ async fn create_account_and_authenticate(
         .and_then(|c| c.first())
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Failed to parse auth_exchange response: {:?}", resp))?;
+        .ok_or_else(|| anyhow!("Failed to parse auth_exchange response"))?;
 
     let token_data: Value = serde_json::from_str(content)?;
     let access_token = token_data["access_token"]
@@ -5254,7 +5675,8 @@ async fn login_flow(
         n.trim().to_string()
     };
 
-    let http_client = HttpClient::new();
+    validate_endpoint(&endpoint)?;
+    let http_client = build_api_client();
     create_account_and_authenticate(&name, &endpoint, &http_client, claim_secret.as_deref())
         .await?;
     println!("Logged in successfully!");
@@ -7592,6 +8014,436 @@ mod tests {
         assert!(args.get("from_name").is_none());
     }
 
+    // --- security hardening tests (#124-#131) ---
+
+    #[test]
+    fn security_validate_endpoint_accepts_https() {
+        assert!(
+            validate_endpoint("https://example.com/mcp").is_ok(),
+            "https endpoint must be accepted"
+        );
+    }
+
+    #[test]
+    fn security_validate_endpoint_rejects_plain_http() {
+        assert!(
+            validate_endpoint("http://example.com/mcp").is_err(),
+            "plain http to a remote host must be rejected"
+        );
+    }
+
+    #[test]
+    fn security_validate_endpoint_allows_loopback_http() {
+        for ep in [
+            "http://127.0.0.1:8080/mcp",
+            "http://localhost:8080/mcp",
+            "http://[::1]:8080/mcp",
+        ] {
+            assert!(validate_endpoint(ep).is_ok(), "loopback http allowed: {ep}");
+        }
+    }
+
+    #[test]
+    fn security_validate_endpoint_rejects_other_schemes_and_garbage() {
+        for ep in [
+            "file:///etc/passwd",
+            "ftp://example.com/mcp",
+            "",
+            "   ",
+            "not a url",
+            "mcp.inboxapi.ai/mcp",
+        ] {
+            assert!(
+                validate_endpoint(ep).is_err(),
+                "must reject endpoint {ep:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn security_validate_endpoint_rejects_credentials_without_echo() {
+        let err = validate_endpoint("https://user:hunter2@example.com/mcp").unwrap_err();
+        assert!(
+            !err.to_string().contains("hunter2"),
+            "error must not echo URL credentials: {err}"
+        );
+        let err = validate_endpoint("https://user:hunter2@[bad").unwrap_err();
+        assert!(
+            !err.to_string().contains("hunter2"),
+            "parse error must not echo the raw URL: {err}"
+        );
+    }
+
+    #[test]
+    fn security_save_credentials_refuses_unsafe_endpoint() {
+        let creds = Credentials {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            account_name: "n".into(),
+            endpoint: "http://attacker.example/mcp".into(),
+            email: None,
+            encryption_secret: None,
+        };
+        assert!(
+            save_credentials(&creds).is_err(),
+            "unsafe endpoint must be rejected before any write"
+        );
+    }
+
+    #[test]
+    fn security_validate_download_url_rejects_internal() {
+        assert!(
+            validate_download_url("https://example.com/file.bin", false).is_ok(),
+            "public https URL must be accepted"
+        );
+        for url in [
+            "http://example.com/file.bin",
+            "ftp://example.com/file.bin",
+            "file:///etc/passwd",
+            "https://user:pw@example.com/file",
+            "https://169.254.169.254/latest",
+            "https://10.0.0.5/file",
+            "https://172.16.0.1/file",
+            "https://192.168.1.1/file",
+            "https://100.64.0.1/file",
+            "https://0.0.0.0/file",
+            "https://[fe80::1]/file",
+            "https://[fd00::1]/file",
+            "https://[::ffff:10.0.0.1]/file",
+            "https://[::ffff:127.0.0.1]/file",
+            "https://[64:ff9b::a9fe:a9fe]/file",
+            "https://127.0.0.1/file",
+            "https://localhost/file",
+            "https://foo.localhost/file",
+            "https://0x7f.1/file",
+        ] {
+            assert!(
+                validate_download_url(url, false).is_err(),
+                "must reject download URL {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn security_validate_download_url_loopback_only_for_loopback_endpoint() {
+        assert!(
+            validate_download_url("http://127.0.0.1:9000/f", true).is_ok(),
+            "loopback dev endpoint may download from loopback"
+        );
+        assert!(
+            validate_download_url("http://127.0.0.1:9000/f", false).is_err(),
+            "remote endpoint must not download from loopback"
+        );
+        assert!(
+            validate_download_url("http://10.0.0.1/f", true).is_err(),
+            "loopback allowance must not extend to private ranges"
+        );
+        assert!(endpoint_is_loopback("http://localhost:3000/mcp"));
+        assert!(!endpoint_is_loopback("https://mcp.inboxapi.ai/mcp"));
+    }
+
+    #[tokio::test]
+    async fn security_public_only_resolver_rejects_localhost() {
+        use reqwest::dns::Resolve;
+        let resolver = PublicOnlyResolver {
+            allow_loopback: false,
+        };
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        assert!(
+            resolver.resolve(name).await.is_err(),
+            "resolver must refuse hostnames resolving to loopback"
+        );
+    }
+
+    #[tokio::test]
+    async fn security_download_refuses_redirect_to_internal() {
+        // Loopback server redirects to a link-local metadata address.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            let response = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+        });
+        let err = download_with_limit(&format!("http://{}", addr), true)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("non-https") || format!("{err:#}").contains("internal"),
+            "redirect to internal address must be refused: {err:#}"
+        );
+    }
+
+    #[test]
+    fn security_read_regular_file_bounded_rejects_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_regular_file_bounded(dir.path(), "--attachment", 1024).unwrap_err();
+        assert!(
+            err.to_string().contains("regular file"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn security_read_regular_file_bounded_enforces_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, vec![0u8; 2048]).unwrap();
+        let err = read_regular_file_bounded(&path, "--attachment", 1024).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_read_regular_file_bounded_rejects_symlink_and_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("secret.txt");
+        std::fs::write(&target, b"secret").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = read_regular_file_bounded(&link, "--attachment", 1024).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "symlinked attachment must be rejected: {err}"
+        );
+
+        let fifo = dir.path().join("pipe");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: c_path is a valid NUL-terminated path.
+        assert_eq!(
+            unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) },
+            0,
+            "mkfifo failed"
+        );
+        let err = read_regular_file_bounded(&fifo, "--attachment", 1024).unwrap_err();
+        assert!(
+            err.to_string().contains("regular file"),
+            "FIFO must be rejected without blocking: {err}"
+        );
+    }
+
+    #[test]
+    fn security_build_attachment_rejects_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = build_attachment_from_file(dir.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("regular file"),
+            "directory attachment must be rejected: {err:#}"
+        );
+    }
+
+    #[test]
+    fn security_open_output_refuses_overwrite_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.bin");
+        std::fs::write(&path, b"existing").unwrap();
+        assert!(
+            open_output_for_write(&path, false).is_err(),
+            "existing file must not be overwritten without --force"
+        );
+        assert!(
+            open_output_for_write(&path, true).is_ok(),
+            "--force must allow overwrite"
+        );
+        assert!(
+            open_output_for_write(dir.path(), true).is_err(),
+            "directory output path must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_open_output_creates_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("out.bin");
+        open_output_for_write(&path, false).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "downloaded file must be owner-only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_open_output_refuses_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.bin");
+        std::fs::write(&target, b"real").unwrap();
+        let link = dir.path().join("link.bin");
+        symlink(&target, &link).unwrap();
+        assert!(
+            open_output_for_write(&link, true).is_err(),
+            "symlinked output must be refused even with --force"
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"real",
+            "symlink target must be untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_open_nofollow_refuses_symlink_final_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, b"keep").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            open_nofollow(&link, false, 0o600).is_err(),
+            "O_NOFOLLOW must refuse a symlink even if a pre-check was raced"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep", "target untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_guard_no_symlink_rejects_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join("linked");
+        symlink(&target, &link).unwrap();
+        assert!(
+            guard_no_symlink(&link.join("f")).is_err(),
+            "symlinked parent directory must be rejected"
+        );
+        assert!(
+            create_dir_all_guarded(&link).is_err(),
+            "creating through a symlinked directory must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_write_if_needed_refuses_symlinked_settings_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.json");
+        std::fs::write(&outside, b"{}").unwrap();
+        let path = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(
+            write_if_needed(&path, "{\"x\":1}", true).is_err(),
+            "write_if_needed must refuse a symlinked target"
+        );
+        assert!(
+            write_file_guarded(&path, b"{}", 0o644).is_err(),
+            "write_file_guarded must refuse a symlinked target"
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"{}", "target untouched");
+    }
+
+    #[test]
+    fn security_redacted_preview_truncates() {
+        let long = "x".repeat(600);
+        let out = redacted_preview(&long, 500);
+        assert!(
+            out.contains("truncated"),
+            "long text must be marked truncated"
+        );
+        assert!(out.chars().count() < 600, "long text must be shortened");
+        assert_eq!(
+            redacted_preview("short", 500),
+            "short",
+            "short text unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn security_read_bounded_line_skips_over_limit_line() {
+        let input: &[u8] = b"{\"a\":1}\r\n0123456789ABCDEF\n{\"b\":2}\n\xff\xfe\ntail";
+        let mut reader = tokio::io::BufReader::with_capacity(4, input);
+        let max = 10;
+        let mut got = Vec::new();
+        loop {
+            let line = read_bounded_line(&mut reader, max).await.unwrap();
+            if line == BoundedLine::Eof {
+                break;
+            }
+            got.push(line);
+        }
+        assert_eq!(
+            got,
+            vec![
+                BoundedLine::Line("{\"a\":1}".into()),
+                BoundedLine::TooLong,
+                BoundedLine::Line("{\"b\":2}".into()),
+                BoundedLine::InvalidUtf8,
+                BoundedLine::Line("tail".into()),
+            ],
+            "over-limit and invalid lines must be skipped without ending the stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn security_read_bounded_line_over_limit_at_eof() {
+        let input: &[u8] = b"ok\n0123456789ABCDEF";
+        let mut reader = tokio::io::BufReader::with_capacity(3, input);
+        assert_eq!(
+            read_bounded_line(&mut reader, 10).await.unwrap(),
+            BoundedLine::Line("ok".into()),
+            "first line"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 10).await.unwrap(),
+            BoundedLine::TooLong,
+            "unterminated over-limit tail"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 10).await.unwrap(),
+            BoundedLine::Eof,
+            "then EOF"
+        );
+    }
+
+    #[tokio::test]
+    async fn security_parse_response_caps_chunked_json() {
+        // Chunked body (no Content-Length) larger than the cap must be rejected.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+            let chunk = vec![b' '; 1024 * 1024];
+            let total = (MAX_JSON_RESPONSE_BYTES as usize / chunk.len()) + 2;
+            for _ in 0..total {
+                let hdr = format!("{:x}\r\n", chunk.len());
+                if std::io::Write::write_all(&mut stream, hdr.as_bytes()).is_err()
+                    || std::io::Write::write_all(&mut stream, &chunk).is_err()
+                    || std::io::Write::write_all(&mut stream, b"\r\n").is_err()
+                {
+                    return;
+                }
+            }
+            let _ = std::io::Write::write_all(&mut stream, b"0\r\n\r\n");
+        });
+        let resp = build_api_client()
+            .get(format!("http://{}", addr))
+            .send()
+            .await
+            .unwrap();
+        let err = parse_response(resp)
+            .await
+            .err()
+            .expect("oversized body must fail");
+        assert!(
+            err.to_string().contains("too large"),
+            "unexpected error: {err}"
+        );
+    }
+
     // --- maxLength injection tests ---
 
     #[test]
@@ -8585,9 +9437,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_with_limit_accepts_success_response() {
         let url = start_single_response_server("200 OK", b"real image bytes");
-        let client = HttpClient::new();
-
-        let bytes = download_with_limit(&client, &url).await.unwrap();
+        let bytes = download_with_limit(&url, true).await.unwrap();
 
         assert_eq!(bytes, b"real image bytes");
     }
@@ -8598,9 +9448,7 @@ mod tests {
             "404 Not Found",
             b"File not found in B2: <Error><Code>NoSuchKey</Code></Error>",
         );
-        let client = HttpClient::new();
-
-        let err = download_with_limit(&client, &url).await.unwrap_err();
+        let err = download_with_limit(&url, true).await.unwrap_err();
         let message = err.to_string();
 
         assert!(message.contains("HTTP 404"));
