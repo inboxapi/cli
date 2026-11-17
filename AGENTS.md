@@ -58,7 +58,7 @@ The proxy derives its tool list from the remote service and hardens it before ad
 
 ## CLI Commands
 
-The binary has 26 subcommands plus a default `proxy` command. Global flags: `--human` (human-readable output instead of JSON) and `--endpoint` (override MCP endpoint). Prefer environment variables over flags for any secret so they don't appear in process listings or shell history.
+The binary has 26 subcommands plus a default `proxy` command. The only true global flag is `--human` (human-readable output instead of JSON). `--endpoint` overrides the MCP endpoint but is accepted only before a subcommand (not after it) and matters mainly for `proxy` and `login`. Prefer environment variables over flags for any secret so they don't appear in process listings or shell history.
 
 ### Account, auth & setup
 
@@ -70,7 +70,6 @@ inboxapi login                                   # Create an account interactive
 inboxapi login --name myagent                    # Non-interactive
 INBOXAPI_CLAIM_SECRET=ibx... inboxapi login --name myagent
 inboxapi whoami                                  # Show account name, email, endpoint
-inboxapi custom-domain-claim                     # Claim a custom-domain primary mailbox
 INBOXAPI_CUSTOM_DOMAIN_SECRET=ibx... \
   inboxapi custom-domain-claim --email-address agent@example.com
 inboxapi reset                                   # Delete stored credentials (prompts, offers backup first)
@@ -90,7 +89,7 @@ Secret env vars: `INBOXAPI_CLAIM_SECRET`, `INBOXAPI_CUSTOM_DOMAIN_SECRET`, `INBO
 inboxapi send-email --to user@example.com --subject "Hi" --body "Hello"
 inboxapi send-email --to a@b.com,c@d.com --subject "X" --body "Hi" --cc "cc@b.com" --priority high
 inboxapi send-email --to u@e.com --subject "News" --body-file ./body.txt --html-body-file ./news.html
-inboxapi send-email --to u@e.com --subject "Report" --attachment ./report.pdf --attachment-ref 9f0206bb-...
+inboxapi send-email --to u@e.com --subject "Report" --body "See attached" --attachment ./report.pdf --attachment-ref 9f0206bb-...
 inboxapi send-reply --message-id "<msg-id>" --body "Thanks!" --reply-all
 inboxapi send-reply --message-id "<msg-id>" --body-file ./r.txt --html-body-file ./r.html --cc new@e.com
 inboxapi forward-email --message-id "<msg-id>" --to recipient@example.com --note "FYI"
@@ -210,10 +209,9 @@ Publishing is fully automated via GitHub Actions. To release a new version:
 This triggers the CI pipeline which:
 - Builds the binary for 5 platforms (Linux x64/arm64, macOS x64/arm64, Windows x64)
 - Creates a GitHub Release with all binaries and a `SHA256SUMS` file
-- Publishes platform-specific npm packages (`@inboxapi/cli-darwin-arm64`, etc.)
-- Publishes the main `@inboxapi/cli` package (waits for platform packages to be visible on npm first)
+- Stages the platform-specific npm packages (`@inboxapi/cli-darwin-arm64`, etc.) and the main `@inboxapi/cli` package as draft releases
 
-No manual npm publish step is needed — the tag is the trigger. Note: the GitHub Run "success" (build + release) can precede npm propagation; allow a few minutes for the new version to appear on the registry before it's installable.
+No manual `npm publish` step is needed — pushing the tag triggers CI to stage the packages as drafts (`npm stage publish --access public`). Drafts remain invisible on npm until a maintainer manually approves them in the npm console. Approve the platform packages first and `@inboxapi/cli` last, then allow a few minutes for registry propagation before the new version is installable.
 
 ## Contribution Workflow
 

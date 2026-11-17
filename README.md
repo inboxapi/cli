@@ -60,7 +60,7 @@ Update with the same command:
 npm install -g @inboxapi/cli@latest
 ```
 
-The CLI also checks for updates automatically when running in proxy mode and installs them in the background.
+The CLI also checks for updates in the background when running in proxy mode and notifies you when a newer version is available (you install it manually with the same npm command).
 
 ## Quick start
 
@@ -119,13 +119,13 @@ Most CLI commands accept `--human` for a human-readable summary instead of JSON.
 inboxapi send-email --to user@example.com --subject "Hello" --body "Hi there"
 inboxapi send-email --to "a@b.com, c@d.com" --subject "Hi" --body "Hello" --cc "cc@b.com" --priority high
 inboxapi send-email --to u@e.com --subject "Newsletter" --body-file ./body.txt --html-body-file ./news.html
-inboxapi send-email --to u@e.com --subject "Report" --attachment ./report.pdf --attachment-ref 9f0206bb-...
+inboxapi send-email --to u@e.com --subject "Report" --body "See attached" --attachment ./report.pdf --attachment-ref 9f0206bb-...
 inboxapi send-reply --message-id "<msg-id>" --body "Thanks!" --reply-all
 inboxapi send-reply --message-id "<msg-id>" --body-file ./reply.txt --html-body-file ./reply.html --cc new@e.com
 inboxapi forward-email --message-id "<msg-id>" --to recipient@example.com --note "FYI"
 ```
 
-- `--to` is comma-separated (repeatable groups). `--cc` / `--bcc` are comma-separated.
+- Pass all recipients as a comma-separated list in a single `--to` flag; repeating `--to` is not supported. `--cc` / `--bcc` are comma-separated.
 - `--body` or `--body-file` (mutually exclusive); `--html-body` or `--html-body-file` (mutually exclusive).
 - `--attachment` = local files (repeatable). `--attachment-ref` = server-side attachments by ID (repeatable).
 - `--priority` = `low`, `normal`, or `high`.
@@ -249,12 +249,12 @@ codex mcp add inboxapi inboxapi
 
 ## Available MCP tools
 
-Starting the proxy exposes the full tool set automatically — no per-tool configuration. Key capabilities:
+Starting the proxy exposes a ready-to-use MCP tool set automatically — no per-tool configuration — though a few destructive and auth tools are restricted for safety (see [Security](#security)). Key capabilities:
 
 - **Read:** `get_emails`, `get_email`, `get_last_email`, `get_email_count`, `get_sent_emails`, `get_thread`, `search_emails`, `get_addressbook`, `get_announcements`
 - **Send:** `send_email`, `send_reply`, `forward_email`
 - **Attachments:** `get_attachment` (short-lived signed download URL)
-- **Account & security:** `whoami`, `auth_introspect`, `verify_owner`, `account_recover`, `custom_domain_claim`
+- **Account & security:** `whoami`, `custom_domain_claim`. The `auth_introspect`, `verify_owner`, and `account_recover` tools are not exposed by the proxy — run the CLI subcommands `inboxapi auth-introspect`, `inboxapi verify-owner`, and `inboxapi account-recover` instead.
 - **Meta:** `help`
 
 Email-reading tools apply trust classification and datamarking to untrusted content before it reaches your agent (see [Security](#security)). Detailed per-tool help is available in the binary via `inboxapi help` and in [`docs/help.md`](docs/help.md).

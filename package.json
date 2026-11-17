@@ -1,6 +1,6 @@
 {
   "name": "@inboxapi/cli",
-  "version": "0.3.14",
+  "version": "0.3.24",
   "description": "📧 Email for your AI 🤖",
   "main": "index.js",
   "bin": {
@@ -28,10 +28,10 @@
     "test": "cargo test"
   },
   "optionalDependencies": {
-    "@inboxapi/cli-darwin-arm64": "0.1.0",
-    "@inboxapi/cli-darwin-x64": "0.1.0",
-    "@inboxapi/cli-linux-arm64": "0.1.0",
-    "@inboxapi/cli-linux-x64": "0.1.0",
-    "@inboxapi/cli-win32-x64": "0.1.0"
+    "@inboxapi/cli-darwin-arm64": "0.3.24",
+    "@inboxapi/cli-darwin-x64": "0.3.24",
+    "@inboxapi/cli-linux-arm64": "0.3.24",
+    "@inboxapi/cli-linux-x64": "0.3.24",
+    "@inboxapi/cli-win32-x64": "0.3.24"
   }
 }
